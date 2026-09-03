@@ -47,3 +47,4 @@ dump.rdb
 .pid
 *.seed
 *.pid.lock
+.agents/
