@@ -29,26 +29,37 @@ const route = useRoute()
 
 <style scoped>
 .navbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 1rem 2rem;
-  background: rgba(36, 36, 36, 0.8);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid #333;
-  margin-bottom: 2rem;
+  background: transparent;
+  backdrop-filter: none;
+  border-bottom: none;
+  margin-bottom: 0;
 }
+
 .nav-brand {
   display: flex;
   align-items: center;
   gap: 0.5rem;
   font-weight: bold;
   font-size: 1.2rem;
+  color: #fff;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
 }
+
 .nav-logo {
   height: 30px;
   width: 30px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
 }
+
 .nav-links {
   display: flex;
   list-style: none;
@@ -56,30 +67,45 @@ const route = useRoute()
   margin: 0;
   padding: 0;
 }
+
 .nav-links a {
-  color: #888;
+  color: rgba(255, 255, 255, 0.8);
   text-decoration: none;
-  transition: color 0.3s;
+  transition: all 0.3s;
   padding: 0.3rem 0.6rem;
   border-radius: 4px;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
 }
+
 .nav-links a:hover {
   color: #fff;
+  background: rgba(255, 255, 255, 0.15);
 }
+
 .nav-links a.active {
   color: #42b883;
-  background: rgba(66, 184, 131, 0.15);
+  background: rgba(66, 184, 131, 0.2);
 }
+
 @media (prefers-color-scheme: light) {
-  .navbar {
-    background: rgba(255, 255, 255, 0.9);
-    border-bottom: 1px solid #e0e0e0;
+  .nav-brand {
+    color: #333;
+    text-shadow: 0 2px 4px rgba(255, 255, 255, 0.5);
   }
+
   .nav-links a {
-    color: #555;
+    color: rgba(0, 0, 0, 0.7);
+    text-shadow: 0 2px 4px rgba(255, 255, 255, 0.5);
   }
+
   .nav-links a:hover {
     color: #000;
+    background: rgba(0, 0, 0, 0.08);
+  }
+
+  .nav-links a.active {
+    color: #42b883;
+    background: rgba(66, 184, 131, 0.15);
   }
 }
 </style>
