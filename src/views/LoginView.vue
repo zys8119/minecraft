@@ -34,6 +34,12 @@
         <p v-if="error" class="login-error">{{ error }}</p>
       </transition>
 
+      <div class="demo-hint">
+        <span class="demo-label">测试账号</span>
+        <span class="demo-cred">用户名: <strong>admin</strong></span>
+        <span class="demo-cred">密码: <strong>admin</strong></span>
+      </div>
+
       <button type="submit" :disabled="loading" :class="{ 'loading': loading }">
         <span v-if="!loading">登录</span>
         <span v-else class="loader"></span>
@@ -200,7 +206,7 @@ async function handleLogin() {
 }
 
 .login-error {
-  margin: -8px 0 16px;
+  margin: -8px 0 12px;
   color: #ef4444;
   font-size: 13px;
   font-weight: 500;
@@ -217,6 +223,44 @@ async function handleLogin() {
   border-radius: 50%;
   background: #ef4444;
   flex-shrink: 0;
+}
+
+.demo-hint {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  margin: 0 0 18px;
+  border-radius: 10px;
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.12);
+  font-size: 13px;
+  color: var(--text-secondary, #64748b);
+  flex-wrap: wrap;
+}
+
+.demo-label {
+  font-weight: 600;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  padding: 2px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.demo-cred {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.demo-cred strong {
+  color: var(--text-primary, #0f172a);
+  font-weight: 600;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 0 6px;
+  border-radius: 4px;
+  font-family: 'Menlo', 'Monaco', monospace;
 }
 
 .fade-enter-active,
@@ -305,6 +349,20 @@ button .loader {
 
   button {
     box-shadow: 0 4px 14px rgba(59, 130, 246, 0.3);
+  }
+
+  .demo-hint {
+    background: rgba(59, 130, 246, 0.08);
+    border-color: rgba(59, 130, 246, 0.15);
+  }
+
+  .demo-cred strong {
+    background: rgba(255, 255, 255, 0.06);
+    color: #e2e8f0;
+  }
+
+  .demo-label {
+    background: rgba(59, 130, 246, 0.2);
   }
 }
 </style>
