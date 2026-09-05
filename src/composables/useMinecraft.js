@@ -1403,6 +1403,24 @@ export function useMinecraft(canvas) {
 
   onBeforeUnmount(dispose);
 
+  // ---------- 全屏控制 ----------
+  function toggleFullscreen() {
+    const el = canvasEl || document.documentElement;
+    if (!document.fullscreenElement) {
+      el.requestFullscreen().catch((err) => {
+        console.warn("[全屏] 进入全屏失败:", err);
+      });
+    } else {
+      document.exitFullscreen().catch((err) => {
+        console.warn("[全屏] 退出全屏失败:", err);
+      });
+    }
+  }
+
+  function isFullscreen() {
+    return !!document.fullscreenElement;
+  }
+
   return {
     isLocked,
     selectedType,
@@ -1420,5 +1438,8 @@ export function useMinecraft(canvas) {
     startAutoSave,
     stopAutoSave,
     getStorageType: () => storageAdapter.getType(),
+    // 全屏功能
+    toggleFullscreen,
+    isFullscreen,
   };
 }
