@@ -1135,6 +1135,32 @@ export function useMinecraft(canvas) {
     }
   }
 
+  // 重置世界（清除存档并重新生成默认地形）
+  async function resetWorld() {
+    try {
+      // 清除存档
+      await storageAdapter.clear(STORAGE_KEY);
+
+      // 清空所有方块
+      voxels.clear();
+
+      // 重新生成地形
+      generateTerrain();
+
+      // 重新构建网格
+      buildMesh();
+
+      // 重置玩家到出生点
+      resetToSpawn();
+
+      console.log("[重置世界] 已重置为默认地形");
+      return true;
+    } catch (e) {
+      console.error("[重置世界] 失败:", e);
+      return false;
+    }
+  }
+
   // 自动存档（每 30 秒）
   let autoSaveInterval = null;
   function startAutoSave(intervalMs = 30000) {
@@ -1435,6 +1461,7 @@ export function useMinecraft(canvas) {
     saveWorld,
     loadWorld,
     clearSave,
+    resetWorld,
     startAutoSave,
     stopAutoSave,
     getStorageType: () => storageAdapter.getType(),
