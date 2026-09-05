@@ -640,9 +640,8 @@ export function useMinecraft(canvas) {
         nx < 0 ||
         nx >= WORLD_SIZE ||
         nz < 0 ||
-        nz >= WORLD_SIZE ||
-        ny < 0 ||
-        ny >= WORLD_HEIGHT
+        nz >= WORLD_SIZE
+        // 移除高度限制：ny 不再受 WORLD_HEIGHT 限制
       ) {
         return;
       }
@@ -652,9 +651,8 @@ export function useMinecraft(canvas) {
         nx < -1 ||
         nx > WORLD_SIZE ||
         nz < -1 ||
-        nz > WORLD_SIZE ||
-        ny < 0 ||
-        ny >= WORLD_HEIGHT
+        nz > WORLD_SIZE
+        // 移除高度限制：ny 不再受 WORLD_HEIGHT 限制
       ) {
         return;
       }
@@ -670,6 +668,19 @@ export function useMinecraft(canvas) {
         return;
       }
     }
+
+    // 如果是在边界外侧放置（命中边界方块），在新方块外侧生成新的边界方块
+    if (isBoundaryHit) {
+      // 计算新方块外侧的位置
+      const outerX = nx + hit.normal.x;
+      const outerY = ny + hit.normal.y;
+      const outerZ = nz + hit.normal.z;
+      // 如果外侧位置还没有边界方块，生成一个
+      if (!getBlock(outerX, outerY, outerZ)) {
+        setBlock(outerX, outerY, outerZ, BOUNDARY_TYPE);
+      }
+    }
+
     buildMesh();
   }
 
