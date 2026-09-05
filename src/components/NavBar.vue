@@ -1,11 +1,54 @@
 <script setup>
 import { useRoute } from 'vue-router'
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 
 const route = useRoute()
+const isHovering = ref(false)
+const isMinecraftPage = ref(false)
+let hideTimeout = null
+
+// 判断是否在 Minecraft 页面
+watch(
+  () => route.path,
+  (path) => {
+    isMinecraftPage.value = path === '/minecraft'
+  },
+  { immediate: true }
+)
+
+function onMouseEnter() {
+  if (!isMinecraftPage.value) return
+  isHovering.value = true
+  if (hideTimeout) {
+    clearTimeout(hideTimeout)
+    hideTimeout = null
+  }
+}
+
+function onMouseLeave() {
+  if (!isMinecraftPage.value) return
+  if (hideTimeout) {
+    clearTimeout(hideTimeout)
+  }
+  hideTimeout = setTimeout(() => {
+    isHovering.value = false
+    hideTimeout = null
+  }, 1000)
+}
+
+onBeforeUnmount(() => {
+  if (hideTimeout) {
+    clearTimeout(hideTimeout)
+    hideTimeout = null
+  }
+})
 </script>
 
 <template>
-  <nav class="navbar">
+  <nav class="navbar" :class="{
+    'navbar-hidden': isMinecraftPage && !isHovering,
+    'navbar-visible': !isMinecraftPage || isHovering
+  }" @mouseenter="onMouseEnter" @mouseleave="onMouseLeave">
     <div class="nav-brand">
       <img src="/vite.svg" alt="Vite" class="nav-logo" />
       <span>Vue 3 项目</span>
@@ -42,6 +85,19 @@ const route = useRoute()
   backdrop-filter: none;
   border-bottom: none;
   margin-bottom: 0;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.4s ease;
+}
+
+.navbar-hidden {
+  transform: translateY(-100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.navbar-visible {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .nav-brand {
