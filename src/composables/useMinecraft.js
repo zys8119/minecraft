@@ -4,6 +4,7 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 
 const WORLD_SIZE = 32; // 世界边长（方块数）
 const WORLD_HEIGHT = 24; // 世界高度（方块数）
+const BOUNDARY_TYPE = 7; // 边界辅助方块类型
 
 // 方块类型表：id -> 名称、颜色、特性
 // solid: 是否实心（false 表示可穿过，如火焰）
@@ -58,9 +59,18 @@ const BLOCK_TYPES = {
     transparent: true,
     emissive: true,
   },
+  7: {
+    name: "边界",
+    base: "#000000",
+    dark: "#000000",
+    solid: false,
+    transparent: true,
+    emissive: false,
+    boundary: true,
+  },
 };
 
-// 可在 HUD 中切换的方块（按数字键 1-6 选择）
+// 可在 HUD 中切换的方块（按数字键 1-6 选择，不包含边界辅助方块 7）
 const SELECTABLE_TYPES = [1, 4, 5, 2, 3, 6];
 
 /**
@@ -141,6 +151,25 @@ export function useMinecraft(canvas) {
         }
       }
     }
+    // 生成边界辅助方块：在世界最外层（x=0, x=WORLD_SIZE-1, z=0, z=WORLD_SIZE-1）
+    generateBoundaryBlocks();
+  }
+
+  function generateBoundaryBlocks() {
+    const boundaryYMin = 0;
+    const boundaryYMax = Math.min(WORLD_HEIGHT, 12); // 只生成底部12层，节约性能
+    for (let y = boundaryYMin; y < boundaryYMax; y++) {
+      for (let x = 0; x < WORLD_SIZE; x++) {
+        // z 方向的两条边界
+        setBlock(x, y, 0, BOUNDARY_TYPE);
+        setBlock(x, y, WORLD_SIZE - 1, BOUNDARY_TYPE);
+      }
+      for (let z = 0; z < WORLD_SIZE; z++) {
+        // x 方向的两条边界
+        setBlock(0, y, z, BOUNDARY_TYPE);
+        setBlock(WORLD_SIZE - 1, y, z, BOUNDARY_TYPE);
+      }
+    }
   }
 
   // ---------- 用 InstancedMesh 高效渲染所有方块 ----------
@@ -157,10 +186,12 @@ export function useMinecraft(canvas) {
       tex.magFilter = THREE.NearestFilter;
       tex.minFilter = THREE.NearestFilter;
       tex.colorSpace = THREE.SRGBColorSpace;
+      // 边界辅助方块完全透明
+      const isBoundary = type === BOUNDARY_TYPE;
       materials[type] = new THREE.MeshLambertMaterial({
         map: tex,
-        transparent: info.transparent,
-        opacity: info.transparent ? 0.55 : 1,
+        transparent: true,
+        opacity: isBoundary ? 0 : info.transparent ? 0.55 : 1,
         emissive: info.emissive ? new THREE.Color("#ff6d00") : undefined,
         emissiveIntensity: info.emissive ? 1.2 : 1,
       });
@@ -201,6 +232,7 @@ export function useMinecraft(canvas) {
     4: "/textures/iron.jpg", // 铁块
     5: "/textures/glass.jpg", // 玻璃
     6: "/textures/flame.jpg", // 火焰
+    7: "/textures/grass.png", // 边界辅助方块（透明纹理，实际不可见）
   };
 
   // ---------- 射线检测：返回命中的方块与命中面法线 ----------
@@ -539,14 +571,23 @@ export function useMinecraft(canvas) {
   }
 
   function removeBlockAt(hit) {
+    const type = getBlock(hit.x, hit.y, hit.z);
+    // 禁止删除边界辅助方块
+    if (type === BOUNDARY_TYPE) return;
     setBlock(hit.x, hit.y, hit.z, 0);
     buildMesh();
   }
 
   function placeBlockAt(hit) {
+    // 禁止在边界辅助方块上叠放
+    const hitType = getBlock(hit.x, hit.y, hit.z);
+    if (hitType === BOUNDARY_TYPE) return;
+
     const nx = hit.x + hit.normal.x;
     const ny = hit.y + hit.normal.y;
     const nz = hit.z + hit.normal.z;
+    // 检查目标位置是否已有方块（不能重复放置）
+    if (getBlock(nx, ny, nz)) return;
     // 不允许把方块放进玩家身体：新方块若与玩家包围盒重叠则拒绝
     setBlock(nx, ny, nz, selectedType.value);
     if (collidesAt(player.position.x, player.position.y, player.position.z)) {
@@ -595,6 +636,8 @@ export function useMinecraft(canvas) {
   function isSolid(x, y, z) {
     const type = getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
     if (!type) return false;
+    // 边界辅助方块不可碰撞
+    if (type === BOUNDARY_TYPE) return false;
     return BLOCK_TYPES[type] ? BLOCK_TYPES[type].solid : true;
   }
 
