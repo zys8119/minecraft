@@ -656,6 +656,38 @@ export function useMinecraft(canvas) {
     buildMesh();
   }
 
+  // 为指定位置的真实砖块生成周围的虚拟砖块
+  function generateBoundaryForBlock(blockX, blockY, blockZ) {
+    const neighbors = [
+      [1, 0, 0],
+      [-1, 0, 0],
+      [0, 0, 1],
+      [0, 0, -1],
+    ];
+
+    for (const [dx, dy, dz] of neighbors) {
+      const nx = blockX + dx;
+      const ny = blockY + dy;
+      const nz = blockZ + dz;
+
+      // 检查该位置是否有真实砖块
+      const neighborType = getBlock(nx, ny, nz);
+      if (neighborType && neighborType !== BOUNDARY_TYPE) continue;
+
+      // 检查该位置是否已有边界方块
+      if (getBlock(nx, ny, nz) === BOUNDARY_TYPE) continue;
+
+      // 虚拟砖块高度降低一个砖块
+      const boundaryY = ny - 1;
+      if (boundaryY >= 0) {
+        // 检查该位置是否已有任何方块
+        if (!getBlock(nx, boundaryY, nz)) {
+          setBlock(nx, boundaryY, nz, BOUNDARY_TYPE);
+        }
+      }
+    }
+  }
+
   function placeBlockAt(hit) {
     const nx = hit.x + hit.normal.x;
     const ny = hit.y + hit.normal.y;
@@ -684,32 +716,8 @@ export function useMinecraft(canvas) {
       }
     }
 
-    // 如果是在边界外侧放置（命中边界方块），在新方块外侧生成新的边界方块
-    if (isBoundaryHit) {
-      // 计算新方块外侧的位置
-      const outerX = nx + hit.normal.x;
-      const outerY = ny + hit.normal.y;
-      const outerZ = nz + hit.normal.z;
-
-      // 检查外侧位置是否已有真实砖块
-      const outerType = getBlock(outerX, outerY, outerZ);
-      if (outerType && outerType !== BOUNDARY_TYPE) {
-        // 如果已经有真实砖块，不需要生成边界
-        // 但需要检查更外侧是否还有位置需要边界
-      }
-
-      // 如果外侧位置还没有边界方块，且没有真实砖块，生成一个
-      if (!outerType || outerType === BOUNDARY_TYPE) {
-        // 边界方块高度降低一个砖块（y-1）
-        const boundaryY = outerY - 1;
-        if (boundaryY >= 0 && !getBlock(outerX, boundaryY, outerZ)) {
-          // 检查该位置是否已有任何方块
-          if (!getBlock(outerX, boundaryY, outerZ)) {
-            setBlock(outerX, boundaryY, outerZ, BOUNDARY_TYPE);
-          }
-        }
-      }
-    }
+    // 为新放置的真实砖块生成周围的虚拟砖块
+    generateBoundaryForBlock(nx, ny, nz);
 
     buildMesh();
   }
