@@ -2,385 +2,55 @@ import { onBeforeUnmount, ref } from "vue";
 import * as THREE from "three";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
 
-const WORLD_SIZE = 32; // 世界边长（方块数）
-const WORLD_HEIGHT = 24; // 世界高度（方块数）
-const BOUNDARY_TYPE = 7; // 边界辅助方块类型
-const STORAGE_KEY = "minecraft_world_data";
+import {
+  BLOCK_TYPES,
+  SELECTABLE_TYPES,
+  TEXTURE_PATHS,
+  BOUNDARY_TYPE,
+} from "./blockTypes.js";
+import { StorageAdapter, STORAGE_KEY } from "./storage.js";
+import {
+  WORLD_SIZE,
+  WORLD_HEIGHT,
+  generateTerrain,
+  generateBoundaryBlocks,
+  generateBoundaryForBlock,
+} from "./worldGenerator.js";
+import {
+  GRAVITY,
+  WALK_SPEED,
+  SPRINT_SPEED,
+  JUMP_SPEED,
+  EYE_HEIGHT,
+  PLAYER_HEIGHT,
+  PLAYER_HALF,
+  stepMoveXZ,
+  stepMoveY,
+  isSolid,
+  collidesAt,
+} from "./physics.js";
+import {
+  raycastBlock,
+  FACE_NAMES,
+  FACE_POSITIONS,
+  FACE_ROTATIONS,
+  NORMAL_TO_FACE,
+} from "./raycaster.js";
 
-// ---------- 存储适配器：按优先级降级 ----------
-class StorageAdapter {
-  constructor() {
-    this.storage = null;
-    this.type = null;
-    this._initStorage();
-  }
-
-  _initStorage() {
-    // 1. 尝试 WebSQL
-    if (window.openDatabase) {
-      try {
-        this.db = window.openDatabase(
-          "minecraft_db",
-          "1.0",
-          "Minecraft World Data",
-          5 * 1024 * 1024,
-        );
-        if (this.db) {
-          this.type = "websql";
-          this._initWebSQL();
-          return;
-        }
-      } catch (e) {
-        console.warn("WebSQL initialization failed:", e);
-      }
-    }
-
-    // 2. 尝试 IndexedDB
-    if (window.indexedDB) {
-      try {
-        this.type = "indexeddb";
-        this.dbName = "minecraft_db";
-        this.storeName = "world_data";
-        this._initIndexedDB();
-        return;
-      } catch (e) {
-        console.warn("IndexedDB initialization failed:", e);
-      }
-    }
-
-    // 3. 尝试 localStorage
-    if (window.localStorage) {
-      try {
-        this.type = "localstorage";
-        this.storage = window.localStorage;
-        return;
-      } catch (e) {
-        console.warn("localStorage initialization failed:", e);
-      }
-    }
-
-    // 4. 降级到 sessionStorage
-    if (window.sessionStorage) {
-      try {
-        this.type = "sessionstorage";
-        this.storage = window.sessionStorage;
-        return;
-      } catch (e) {
-        console.warn("sessionStorage initialization failed:", e);
-      }
-    }
-
-    this.type = "memory";
-    this.memoryStorage = new Map();
-    console.warn("No persistent storage available, using memory storage");
-  }
-
-  _initWebSQL() {
-    this.db.transaction((tx) => {
-      tx.executeSql(
-        "CREATE TABLE IF NOT EXISTS world_data (id INTEGER PRIMARY KEY, key TEXT UNIQUE, value TEXT)",
-        [],
-        () => {},
-        (tx, err) => {
-          console.warn("WebSQL create table error:", err);
-          return false;
-        },
-      );
-    });
-  }
-
-  _initIndexedDB() {
-    if (this._indexedDBReady) return;
-    const request = window.indexedDB.open(this.dbName, 1);
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(this.storeName)) {
-        db.createObjectStore(this.storeName, { keyPath: "key" });
-      }
-    };
-    request.onsuccess = (event) => {
-      this._indexedDBReady = true;
-      this._indexedDB = event.target.result;
-    };
-    request.onerror = (event) => {
-      console.warn("IndexedDB open error:", event.target.error);
-    };
-  }
-
-  _getIndexedDB() {
-    return new Promise((resolve, reject) => {
-      if (this._indexedDB) {
-        resolve(this._indexedDB);
-        return;
-      }
-      const request = window.indexedDB.open(this.dbName, 1);
-      request.onsuccess = (event) => {
-        this._indexedDB = event.target.result;
-        resolve(this._indexedDB);
-      };
-      request.onerror = (event) => reject(event.target.error);
-    });
-  }
-
-  async save(key, data) {
-    const value = JSON.stringify(data);
-
-    switch (this.type) {
-      case "websql":
-        return new Promise((resolve, reject) => {
-          this.db.transaction((tx) => {
-            tx.executeSql(
-              "INSERT OR REPLACE INTO world_data (key, value) VALUES (?, ?)",
-              [key, value],
-              () => resolve(),
-              (tx, err) => {
-                reject(err);
-                return false;
-              },
-            );
-          });
-        });
-
-      case "indexeddb":
-        try {
-          const db = await this._getIndexedDB();
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction([this.storeName], "readwrite");
-            const store = tx.objectStore(this.storeName);
-            const request = store.put({ key, value });
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
-          });
-        } catch (e) {
-          throw e;
-        }
-
-      case "localstorage":
-      case "sessionstorage":
-        try {
-          this.storage.setItem(key, value);
-          return Promise.resolve();
-        } catch (e) {
-          return Promise.reject(e);
-        }
-
-      case "memory":
-        this.memoryStorage.set(key, value);
-        return Promise.resolve();
-
-      default:
-        return Promise.reject(new Error("Unsupported storage type"));
-    }
-  }
-
-  async load(key) {
-    switch (this.type) {
-      case "websql":
-        return new Promise((resolve, reject) => {
-          this.db.transaction((tx) => {
-            tx.executeSql(
-              "SELECT value FROM world_data WHERE key = ?",
-              [key],
-              (tx, results) => {
-                if (results.rows.length > 0) {
-                  try {
-                    resolve(JSON.parse(results.rows.item(0).value));
-                  } catch (e) {
-                    resolve(null);
-                  }
-                } else {
-                  resolve(null);
-                }
-              },
-              (tx, err) => {
-                reject(err);
-                return false;
-              },
-            );
-          });
-        });
-
-      case "indexeddb":
-        try {
-          const db = await this._getIndexedDB();
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction([this.storeName], "readonly");
-            const store = tx.objectStore(this.storeName);
-            const request = store.get(key);
-            request.onsuccess = () => {
-              if (request.result) {
-                try {
-                  resolve(JSON.parse(request.result.value));
-                } catch (e) {
-                  resolve(null);
-                }
-              } else {
-                resolve(null);
-              }
-            };
-            request.onerror = () => reject(request.error);
-          });
-        } catch (e) {
-          return Promise.resolve(null);
-        }
-
-      case "localstorage":
-      case "sessionstorage":
-        try {
-          const data = this.storage.getItem(key);
-          return data ? JSON.parse(data) : null;
-        } catch (e) {
-          return null;
-        }
-
-      case "memory":
-        const data = this.memoryStorage.get(key);
-        return data ? JSON.parse(data) : null;
-
-      default:
-        return null;
-    }
-  }
-
-  async clear(key) {
-    switch (this.type) {
-      case "websql":
-        return new Promise((resolve, reject) => {
-          this.db.transaction((tx) => {
-            tx.executeSql(
-              "DELETE FROM world_data WHERE key = ?",
-              [key],
-              () => resolve(),
-              (tx, err) => {
-                reject(err);
-                return false;
-              },
-            );
-          });
-        });
-
-      case "indexeddb":
-        try {
-          const db = await this._getIndexedDB();
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction([this.storeName], "readwrite");
-            const store = tx.objectStore(this.storeName);
-            const request = store.delete(key);
-            request.onsuccess = () => resolve();
-            request.onerror = () => reject(request.error);
-          });
-        } catch (e) {
-          return Promise.resolve();
-        }
-
-      case "localstorage":
-      case "sessionstorage":
-        this.storage.removeItem(key);
-        return Promise.resolve();
-
-      case "memory":
-        this.memoryStorage.delete(key);
-        return Promise.resolve();
-
-      default:
-        return Promise.resolve();
-    }
-  }
-
-  getType() {
-    return this.type;
-  }
-}
-
+const WHEEL_THROTTLE_MS = 150;
 const storageAdapter = new StorageAdapter();
 
-// 方块类型表：id -> 名称、颜色、特性
-// solid: 是否实心（false 表示可穿过，如火焰）
-// transparent: 是否透明（玻璃）
-// emissive: 是否自发光（火焰）
-const BLOCK_TYPES = {
-  1: {
-    name: "草坪",
-    base: "#7cb342",
-    dark: "#558b2f",
-    solid: true,
-    transparent: false,
-    emissive: false,
-  },
-  2: {
-    name: "泥土",
-    base: "#8d6e63",
-    dark: "#6d4c41",
-    solid: true,
-    transparent: false,
-    emissive: false,
-  },
-  3: {
-    name: "石头",
-    base: "#9e9e9e",
-    dark: "#757575",
-    solid: true,
-    transparent: false,
-    emissive: false,
-  },
-  4: {
-    name: "铁块",
-    base: "#b0bec5",
-    dark: "#78909c",
-    solid: true,
-    transparent: false,
-    emissive: false,
-  },
-  5: {
-    name: "玻璃",
-    base: "#c8e6ff",
-    dark: "#e3f2fd",
-    solid: true,
-    transparent: true,
-    emissive: false,
-  },
-  6: {
-    name: "火焰",
-    base: "#ff9800",
-    dark: "#f57c00",
-    solid: false,
-    transparent: true,
-    emissive: true,
-  },
-  7: {
-    name: "边界",
-    base: "#000000",
-    dark: "#000000",
-    solid: false,
-    transparent: true,
-    emissive: false,
-    boundary: true,
-  },
-};
-
-// 可在 HUD 中切换的方块（按数字键 1-6 选择，不包含边界辅助方块 7）
-const SELECTABLE_TYPES = [1, 4, 5, 2, 3, 6];
-
-// 滚轮切换节流时间（毫秒）
-const WHEEL_THROTTLE_MS = 150;
-
 /**
- * 我的世界风格体素沙盒：
- * - 简单噪声地形生成
- * - 第一人称移动（WASD + 空格跳跃 + Shift 下蹲）
- * - 左键破坏方块 / 右键放置方块
- * - 准星瞄准的方块高亮
+ * 我的世界风格体素沙盒主组合式函数
  */
 export function useMinecraft(canvas) {
   const isLocked = ref(false);
-  // canvas 可能以 ref 形式传入；在 init 时再解包，确保拿到已挂载的 DOM 元素
   let canvasEl = null;
-
   let renderer, scene, camera, controls;
   let rafId = 0;
   let disposed = false;
 
-  // 方块体素数据：`x,y,z` 键 -> 方块类型。只存实心方块，未命中即空气。
+  // 方块体素数据
   const voxels = new Map();
   const blockMeshes = new THREE.Group();
 
@@ -392,6 +62,7 @@ export function useMinecraft(canvas) {
     yaw: 0,
     pitch: 0,
   };
+
   const keys = {
     forward: false,
     back: false,
@@ -401,10 +72,9 @@ export function useMinecraft(canvas) {
     sprint: false,
   };
 
+  // ---------- 工具函数 ----------
   const keyToBlock = (x, y, z) => `${x},${y},${z}`;
-
   const getBlock = (x, y, z) => voxels.get(keyToBlock(x, y, z));
-
   const setBlock = (x, y, z, type) => {
     const key = keyToBlock(x, y, z);
     if (type === 0 || type == null) {
@@ -414,102 +84,31 @@ export function useMinecraft(canvas) {
     }
   };
 
-  // ---------- 地形生成：一个起伏的草地平原，地表草块、下方泥土、再往下石头 ----------
-  function generateTerrain() {
-    voxels.clear();
-    for (let x = 0; x < WORLD_SIZE; x++) {
-      for (let z = 0; z < WORLD_SIZE; z++) {
-        // 用距离中心点的衰减 + 正弦叠加做柔和起伏
-        const cx = x - WORLD_SIZE / 2;
-        const cz = z - WORLD_SIZE / 2;
-        const dist = Math.sqrt(cx * cx + cz * cz);
-        const height =
-          Math.floor(
-            WORLD_HEIGHT / 2 +
-              Math.sin(x * 0.35) * 2 +
-              Math.cos(z * 0.3) * 2 +
-              Math.sin((x + z) * 0.15) * 2.5 -
-              Math.max(0, dist - 12) * 0.6,
-          ) + 1;
-        for (let y = 0; y <= height; y++) {
-          let type;
-          if (y === height)
-            type = 1; // 草
-          else if (y >= height - 3)
-            type = 2; // 泥土
-          else type = 3; // 石头
-          setBlock(x, y, z, type);
-        }
-      }
-    }
-    // 生成边界辅助方块：在世界最外层（x=0, x=WORLD_SIZE-1, z=0, z=WORLD_SIZE-1）
-    generateBoundaryBlocks();
-  }
+  // 封装的生成函数（注入依赖）
+  const _generateTerrain = () => generateTerrain(voxels, getBlock, setBlock);
+  const _generateBoundaryBlocks = () =>
+    generateBoundaryBlocks(voxels, getBlock, setBlock);
+  const _generateBoundaryForBlock = (x, y, z) =>
+    generateBoundaryForBlock(x, y, z, getBlock, setBlock);
 
-  function generateBoundaryBlocks() {
-    // 只在最外侧真实砖块的四周且周围没有真实砖块的位置放置虚拟砖块
-    // 虚拟砖块高度比真实砖块低一个砖块（y-1）
-    const boundaryPositions = new Set();
+  // 封装的物理函数（注入依赖）
+  const _isSolid = (x, y, z) => isSolid(x, y, z, getBlock);
+  const _collidesAt = (px, py, pz) => collidesAt(px, py, pz, getBlock);
+  const _stepMoveXZ = (dt) => stepMoveXZ(player, dt, getBlock);
+  const _stepMoveY = (dt) => stepMoveY(player, dt, getBlock);
 
-    // 遍历所有真实砖块
-    for (const [key, type] of voxels.entries()) {
-      // 跳过边界方块（type 7）
-      if (type === BOUNDARY_TYPE) continue;
-
-      const [x, y, z] = key.split(",").map(Number);
-
-      // 检查四个水平方向（上、下、左、右）
-      const neighbors = [
-        [1, 0, 0],
-        [-1, 0, 0],
-        [0, 0, 1],
-        [0, 0, -1],
-      ];
-
-      for (const [dx, dy, dz] of neighbors) {
-        const nx = x + dx;
-        const ny = y + dy;
-        const nz = z + dz;
-
-        // 检查该位置是否有真实砖块（排除边界方块）
-        const neighborType = getBlock(nx, ny, nz);
-        if (neighborType && neighborType !== BOUNDARY_TYPE) continue;
-
-        // 检查该位置是否已有边界方块
-        if (getBlock(nx, ny, nz) === BOUNDARY_TYPE) continue;
-
-        // 在该位置放置虚拟砖块，但高度降低一个砖块（y-1）
-        // 这样虚拟砖块在真实砖块的下方，玩家站在真实砖块上时能选中虚拟砖块的外侧面
-        const boundaryY = ny - 1;
-        // 确保边界方块不低于地面（最小 y=0）
-        if (boundaryY >= 0) {
-          boundaryPositions.add(`${nx},${boundaryY},${nz}`);
-        }
-      }
-    }
-
-    // 将虚拟砖块添加到 voxels
-    for (const key of boundaryPositions) {
-      const [x, y, z] = key.split(",").map(Number);
-      // 检查该位置是否已有任何方块（避免覆盖真实砖块）
-      if (!getBlock(x, y, z)) {
-        setBlock(x, y, z, BOUNDARY_TYPE);
-      }
-    }
-  }
-
-  // ---------- 用 InstancedMesh 高效渲染所有方块 ----------
+  // ---------- 构建网格 ----------
   function buildMesh() {
     blockMeshes.clear();
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
-    // 用 TextureLoader 加载 local 网络图片贴图
     const loader = new THREE.TextureLoader();
     const materials = {};
+
     for (const [typeStr, info] of Object.entries(BLOCK_TYPES)) {
       const type = Number(typeStr);
       const isBoundary = type === BOUNDARY_TYPE;
-      // 边界辅助方块：完全透明，不使用纹理
+
       if (isBoundary) {
         materials[type] = new THREE.MeshLambertMaterial({
           transparent: true,
@@ -520,6 +119,7 @@ export function useMinecraft(canvas) {
         });
         continue;
       }
+
       const tex = loader.load(TEXTURE_PATHS[type]);
       tex.magFilter = THREE.NearestFilter;
       tex.minFilter = THREE.NearestFilter;
@@ -533,7 +133,6 @@ export function useMinecraft(canvas) {
       });
     }
 
-    // 按类型分组创建 InstancedMesh
     const byType = new Map();
     for (const [key, type] of voxels.entries()) {
       if (!byType.has(type)) byType.set(type, []);
@@ -560,112 +159,13 @@ export function useMinecraft(canvas) {
     scene.add(blockMeshes);
   }
 
-  // 方块贴图路径：本地 public/textures 下的网络图片
-  const TEXTURE_PATHS = {
-    1: "/textures/grass.png", // 草顶
-    2: "/textures/dirt.png", // 泥土
-    3: "/textures/stone.jpg", // 石头
-    4: "/textures/iron.jpg", // 铁块
-    5: "/textures/glass.jpg", // 玻璃
-    6: "/textures/flame.jpg", // 火焰
-    7: "/textures/grass.png", // 边界辅助方块（透明纹理，实际不可见）
-  };
-
-  // ---------- 射线检测：返回命中的方块与命中面法线 ----------
-  function raycastBlock(maxDist = 15) {
-    const origin = camera.position.clone();
-    const dir = camera.getWorldDirection(new THREE.Vector3());
-
-    // 用 DDA 体素遍历算法，在 3D 网格上逐格推进
-    let x = Math.floor(origin.x);
-    let y = Math.floor(origin.y);
-    let z = Math.floor(origin.z);
-
-    const stepX = dir.x > 0 ? 1 : -1;
-    const stepY = dir.y > 0 ? 1 : -1;
-    const stepZ = dir.z > 0 ? 1 : -1;
-
-    const tDeltaX = Math.abs(1 / dir.x);
-    const tDeltaY = Math.abs(1 / dir.y);
-    const tDeltaZ = Math.abs(1 / dir.z);
-
-    let tMaxX =
-      dir.x !== 0
-        ? (stepX > 0 ? x + 1 - origin.x : origin.x - x) * tDeltaX
-        : Infinity;
-    let tMaxY =
-      dir.y !== 0
-        ? (stepY > 0 ? y + 1 - origin.y : origin.y - y) * tDeltaY
-        : Infinity;
-    let tMaxZ =
-      dir.z !== 0
-        ? (stepZ > 0 ? z + 1 - origin.z : origin.z - z) * tDeltaZ
-        : Infinity;
-
-    let normal = null;
-    let t = 0;
-
-    while (t <= maxDist) {
-      if (getBlock(x, y, z)) {
-        return { x, y, z, normal: normal || new THREE.Vector3(0, -1, 0) };
-      }
-      if (tMaxX < tMaxY && tMaxX < tMaxZ) {
-        x += stepX;
-        t = tMaxX;
-        tMaxX += tDeltaX;
-        normal = new THREE.Vector3(-stepX, 0, 0);
-      } else if (tMaxY < tMaxZ) {
-        y += stepY;
-        t = tMaxY;
-        tMaxY += tDeltaY;
-        normal = new THREE.Vector3(0, -stepY, 0);
-      } else {
-        z += stepZ;
-        t = tMaxZ;
-        tMaxZ += tDeltaZ;
-        normal = new THREE.Vector3(0, 0, -stepZ);
-      }
-    }
-    return null;
-  }
-
-  // 准星瞄准的方块高亮：只显示命中的那个面（蓝色边框 + 半透明蓝色填充）
+  // ---------- 高亮面 ----------
   const faceGroup = new THREE.Group();
   faceGroup.visible = false;
 
-  const faceNames = ["right", "left", "top", "bottom", "front", "back"];
-  const facePositions = {
-    right: [0.5, 0, 0],
-    left: [-0.5, 0, 0],
-    top: [0, 0.5, 0],
-    bottom: [0, -0.5, 0],
-    front: [0, 0, 0.5],
-    back: [0, 0, -0.5],
-  };
-  const faceRotations = {
-    right: [0, Math.PI / 2, 0],
-    left: [0, -Math.PI / 2, 0],
-    top: [-Math.PI / 2, 0, 0],
-    bottom: [Math.PI / 2, 0, 0],
-    front: [0, 0, 0],
-    back: [0, Math.PI, 0],
-  };
-
-  // 法线方向到面名称的映射
-  const normalToFace = {
-    "1,0,0": "right",
-    "-1,0,0": "left",
-    "0,1,0": "top",
-    "0,-1,0": "bottom",
-    "0,0,1": "front",
-    "0,0,-1": "back",
-  };
-
   const faceMeshes = {};
-  faceNames.forEach((name) => {
+  FACE_NAMES.forEach((name) => {
     const geo = new THREE.PlaneGeometry(1.01, 1.01);
-
-    // 边框线
     const edges = new THREE.EdgesGeometry(geo);
     const lineMat = new THREE.LineBasicMaterial({
       color: 0x2196f3,
@@ -676,7 +176,6 @@ export function useMinecraft(canvas) {
     const line = new THREE.LineSegments(edges, lineMat);
     line.renderOrder = 999;
 
-    // 填充面
     const fillMat = new THREE.MeshBasicMaterial({
       color: 0x2196f3,
       transparent: true,
@@ -690,43 +189,33 @@ export function useMinecraft(canvas) {
     const group = new THREE.Group();
     group.add(line);
     group.add(fill);
-
     group.position.set(
-      facePositions[name][0],
-      facePositions[name][1],
-      facePositions[name][2],
+      FACE_POSITIONS[name][0],
+      FACE_POSITIONS[name][1],
+      FACE_POSITIONS[name][2],
     );
     group.rotation.set(
-      faceRotations[name][0],
-      faceRotations[name][1],
-      faceRotations[name][2],
+      FACE_ROTATIONS[name][0],
+      FACE_ROTATIONS[name][1],
+      FACE_ROTATIONS[name][2],
     );
-
     faceGroup.add(group);
     faceMeshes[name] = group;
   });
 
-  // 当前高亮的面
-  let currentHighlightFace = null;
-
-  // 已选中的方块类型（默认草块）；用 ref 以便 HUD 响应式显示
+  // ---------- 选中方块 ----------
   const selectedType = ref(1);
-
-  // 滚轮切换节流相关
   let lastWheelTime = 0;
 
-  // 按数字键切换选中方块
   function selectType(index) {
     if (index >= 0 && index < SELECTABLE_TYPES.length) {
       selectedType.value = SELECTABLE_TYPES[index];
     }
   }
 
-  // 滚轮切换方块（带节流）
   function onWheel(e) {
     if (!isLocked.value) return;
     e.preventDefault();
-
     const now = performance.now();
     if (now - lastWheelTime < WHEEL_THROTTLE_MS) return;
     lastWheelTime = now;
@@ -736,10 +225,8 @@ export function useMinecraft(canvas) {
 
     let newIndex = currentIndex;
     if (e.deltaY > 0) {
-      // 向下滚动：下一个
       newIndex = (currentIndex + 1) % SELECTABLE_TYPES.length;
     } else if (e.deltaY < 0) {
-      // 向上滚动：上一个
       newIndex =
         (currentIndex - 1 + SELECTABLE_TYPES.length) % SELECTABLE_TYPES.length;
     } else {
@@ -748,89 +235,102 @@ export function useMinecraft(canvas) {
     selectType(newIndex);
   }
 
-  function init() {
-    // 此处解包 ref：onMounted 之后 canvas 元素已挂载，能取到真实 DOM
-    canvasEl = canvas && canvas.value !== undefined ? canvas.value : canvas;
-    if (!canvasEl) {
-      console.error("[useMinecraft] canvas 元素未找到");
-      return;
+  // ---------- 游戏操作 ----------
+  function removeBlockAt(hit) {
+    const type = getBlock(hit.x, hit.y, hit.z);
+    if (type === BOUNDARY_TYPE) return;
+    setBlock(hit.x, hit.y, hit.z, 0);
+    buildMesh();
+  }
+
+  function placeBlockAt(hit) {
+    const nx = hit.x + hit.normal.x;
+    const ny = hit.y + hit.normal.y;
+    const nz = hit.z + hit.normal.z;
+
+    if (getBlock(nx, ny, nz)) return;
+
+    const hitType = getBlock(hit.x, hit.y, hit.z);
+    const isBoundaryHit = hitType === BOUNDARY_TYPE;
+
+    setBlock(nx, ny, nz, selectedType.value);
+    if (!isBoundaryHit) {
+      if (
+        _collidesAt(player.position.x, player.position.y, player.position.z)
+      ) {
+        setBlock(nx, ny, nz, 0);
+        return;
+      }
     }
 
-    // 场景
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x87ceeb);
-    scene.fog = new THREE.Fog(0x87ceeb, 30, 70);
-
-    // 渲染器
-    renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setSize(canvasEl.clientWidth, canvasEl.clientHeight, false);
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-
-    // 相机
-    camera = new THREE.PerspectiveCamera(
-      75,
-      canvasEl.clientWidth / canvasEl.clientHeight,
-      0.1,
-      200,
-    );
-
-    // 光照
-    const sun = new THREE.DirectionalLight(0xffffff, 2.5);
-    sun.position.set(40, 60, 30);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -50;
-    sun.shadow.camera.right = 50;
-    sun.shadow.camera.top = 50;
-    sun.shadow.camera.bottom = -50;
-    sun.shadow.camera.far = 150;
-    scene.add(sun);
-    scene.add(new THREE.AmbientLight(0xbfd9ff, 1.2));
-
-    // 控制器
-    controls = new PointerLockControls(camera, canvasEl);
-    controls.addEventListener("lock", () => {
-      isLocked.value = true;
-    });
-    controls.addEventListener("unlock", () => {
-      isLocked.value = false;
-    });
-
-    // 生成世界
-    generateTerrain();
+    _generateBoundaryForBlock(nx, ny, nz);
     buildMesh();
-    scene.add(faceGroup);
+  }
 
-    // 尝试加载存档（异步，不阻塞初始化）
-    loadWorld().then((loaded) => {
-      if (loaded) {
-        console.log("[存档] 自动读档成功");
-        // 重新构建网格和边界
-        buildMesh();
-        // 重新生成边界方块（基于加载后的真实砖块）
-        generateBoundaryBlocks();
-        buildMesh();
-        // 更新相机位置
-        camera.position.set(
-          player.position.x,
-          player.position.y + EYE_HEIGHT,
-          player.position.z,
-        );
-      } else {
-        console.log("[存档] 没有存档，使用默认世界");
-        // 玩家初始位置：中心点地表上方
-        const spawnX = Math.floor(WORLD_SIZE / 2);
-        const spawnZ = Math.floor(WORLD_SIZE / 2);
-        let groundY = WORLD_HEIGHT - 1;
-        for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
-          if (getBlock(spawnX, y, spawnZ)) {
-            groundY = y + 1;
-            break;
-          }
-        }
-        player.position.set(spawnX + 0.5, groundY + 0.02, spawnZ + 0.5);
+  function resetToSpawn() {
+    const spawnX = Math.floor(WORLD_SIZE / 2);
+    const spawnZ = Math.floor(WORLD_SIZE / 2);
+    let groundY = WORLD_HEIGHT - 1;
+    for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
+      if (getBlock(spawnX, y, spawnZ)) {
+        groundY = y + 1;
+        break;
+      }
+    }
+    player.position.set(spawnX + 0.5, groundY + 0.02, spawnZ + 0.5);
+    player.velocity.set(0, 0, 0);
+    player.onGround = true;
+    camera.position.set(
+      player.position.x,
+      player.position.y + EYE_HEIGHT,
+      player.position.z,
+    );
+  }
+
+  // ---------- 存档 ----------
+  async function saveWorld() {
+    try {
+      const data = {
+        voxels: Array.from(voxels.entries()),
+        player: {
+          x: player.position.x,
+          y: player.position.y,
+          z: player.position.z,
+          yaw: player.yaw,
+          pitch: player.pitch,
+        },
+        selectedType: selectedType.value,
+        timestamp: Date.now(),
+        storageType: storageAdapter.getType(),
+      };
+      await storageAdapter.save(STORAGE_KEY, data);
+      console.log(
+        `[存档] 已保存到 ${storageAdapter.getType()}, 共 ${data.voxels.length} 个方块`,
+      );
+      return true;
+    } catch (e) {
+      console.error("[存档] 保存失败:", e);
+      return false;
+    }
+  }
+
+  async function loadWorld() {
+    try {
+      const data = await storageAdapter.load(STORAGE_KEY);
+      if (!data) {
+        console.log("[读档] 没有找到存档数据");
+        return false;
+      }
+
+      voxels.clear();
+      for (const [key, type] of data.voxels) {
+        voxels.set(key, type);
+      }
+
+      if (data.player) {
+        player.position.set(data.player.x, data.player.y, data.player.z);
+        player.yaw = data.player.yaw || 0;
+        player.pitch = data.player.pitch || 0;
         player.velocity.set(0, 0, 0);
         player.onGround = true;
         camera.position.set(
@@ -839,23 +339,141 @@ export function useMinecraft(canvas) {
           player.position.z,
         );
       }
-    });
 
-    // 启动自动存档（每 30 秒）
-    startAutoSave(30000);
+      if (data.selectedType) {
+        selectedType.value = data.selectedType;
+      }
 
-    // 事件绑定
-    document.addEventListener("keydown", onKeyDown);
-    document.addEventListener("keyup", onKeyUp);
-    document.addEventListener("mousedown", onMouseDown);
-    document.addEventListener("contextmenu", onContextMenu);
-    document.addEventListener("wheel", onWheel, { passive: false });
-    document.addEventListener("fullscreenchange", onFullscreenChange);
-    window.addEventListener("resize", onResize);
-
-    animate();
+      buildMesh();
+      console.log(
+        `[读档] 已从 ${data.storageType || storageAdapter.getType()} 加载，共 ${data.voxels.length} 个方块`,
+      );
+      return true;
+    } catch (e) {
+      console.error("[读档] 加载失败:", e);
+      return false;
+    }
   }
 
+  async function clearSave() {
+    try {
+      await storageAdapter.clear(STORAGE_KEY);
+      console.log("[清除存档] 已清除");
+      return true;
+    } catch (e) {
+      console.error("[清除存档] 失败:", e);
+      return false;
+    }
+  }
+
+  async function resetWorld() {
+    try {
+      await storageAdapter.clear(STORAGE_KEY);
+      voxels.clear();
+      _generateTerrain();
+      buildMesh();
+      resetToSpawn();
+      console.log("[重置世界] 已重置为默认地形");
+      return true;
+    } catch (e) {
+      console.error("[重置世界] 失败:", e);
+      return false;
+    }
+  }
+
+  // ---------- 自动存档 ----------
+  let autoSaveInterval = null;
+  function startAutoSave(intervalMs = 30000) {
+    stopAutoSave();
+    autoSaveInterval = setInterval(() => {
+      if (isLocked.value) {
+        saveWorld();
+      }
+    }, intervalMs);
+  }
+
+  function stopAutoSave() {
+    if (autoSaveInterval) {
+      clearInterval(autoSaveInterval);
+      autoSaveInterval = null;
+    }
+  }
+
+  // ---------- 更新玩家 ----------
+  function updatePlayer(dt) {
+    if (!isLocked.value) return;
+
+    player.yaw = controls.getAzimuthalAngle ? camera.rotation.y : player.yaw;
+    player.pitch = camera.rotation.x;
+
+    const forward = new THREE.Vector3();
+    camera.getWorldDirection(forward);
+    forward.y = 0;
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(
+      forward,
+      new THREE.Vector3(0, 1, 0),
+    );
+
+    const move = new THREE.Vector3();
+    if (keys.forward) move.add(forward);
+    if (keys.back) move.sub(forward);
+    if (keys.left) move.sub(right);
+    if (keys.right) move.add(right);
+    if (move.lengthSq() > 0) move.normalize();
+
+    const speed = keys.sprint ? SPRINT_SPEED : WALK_SPEED;
+    const velocityXZ = move.multiplyScalar(speed);
+    player.velocity.x = velocityXZ.x;
+    player.velocity.z = velocityXZ.z;
+
+    if (keys.jump && player.onGround) {
+      player.velocity.y = JUMP_SPEED;
+      player.onGround = false;
+    }
+
+    player.velocity.y += GRAVITY * dt;
+    const MAX_FALL = 18;
+    if (player.velocity.y < -MAX_FALL) player.velocity.y = -MAX_FALL;
+
+    _stepMoveXZ(dt);
+    _stepMoveY(dt);
+
+    camera.position.set(
+      player.position.x,
+      player.position.y + EYE_HEIGHT,
+      player.position.z,
+    );
+  }
+
+  // ---------- 高亮更新 ----------
+  function updateHighlight() {
+    if (!isLocked.value) {
+      faceGroup.visible = false;
+      return;
+    }
+    const hit = raycastBlock(camera, getBlock);
+    if (hit) {
+      const normalKey = `${Math.round(hit.normal.x)},${Math.round(hit.normal.y)},${Math.round(hit.normal.z)}`;
+      const faceName = NORMAL_TO_FACE[normalKey];
+
+      FACE_NAMES.forEach((name) => {
+        faceMeshes[name].visible = false;
+      });
+
+      if (faceName && faceMeshes[faceName]) {
+        faceMeshes[faceName].visible = true;
+        faceGroup.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
+        faceGroup.visible = true;
+      } else {
+        faceGroup.visible = false;
+      }
+    } else {
+      faceGroup.visible = false;
+    }
+  }
+
+  // ---------- 事件处理 ----------
   function onKeyDown(e) {
     switch (e.code) {
       case "KeyW":
@@ -883,7 +501,6 @@ export function useMinecraft(canvas) {
         keys.sprint = true;
         break;
       case "KeyR":
-        // 重生：传回地表
         resetToSpawn();
         break;
       case "Digit1":
@@ -943,241 +560,18 @@ export function useMinecraft(canvas) {
 
   function onMouseDown(e) {
     if (!isLocked.value) return;
-    const hit = raycastBlock();
+    const hit = raycastBlock(camera, getBlock);
     if (!hit) return;
 
     if (e.button === 0) {
-      // 左键：破坏方块
       removeBlockAt(hit);
     } else if (e.button === 2) {
-      // 右键：放置方块
       placeBlockAt(hit);
     }
   }
 
   function onContextMenu(e) {
     e.preventDefault();
-  }
-
-  function removeBlockAt(hit) {
-    const type = getBlock(hit.x, hit.y, hit.z);
-    // 禁止删除边界辅助方块
-    if (type === BOUNDARY_TYPE) return;
-    setBlock(hit.x, hit.y, hit.z, 0);
-    buildMesh();
-  }
-
-  // 为指定位置的真实砖块生成周围的虚拟砖块
-  function generateBoundaryForBlock(blockX, blockY, blockZ) {
-    const neighbors = [
-      [1, 0, 0],
-      [-1, 0, 0],
-      [0, 0, 1],
-      [0, 0, -1],
-    ];
-
-    for (const [dx, dy, dz] of neighbors) {
-      const nx = blockX + dx;
-      const ny = blockY + dy;
-      const nz = blockZ + dz;
-
-      // 检查该位置是否有真实砖块
-      const neighborType = getBlock(nx, ny, nz);
-      if (neighborType && neighborType !== BOUNDARY_TYPE) continue;
-
-      // 检查该位置是否已有边界方块
-      if (getBlock(nx, ny, nz) === BOUNDARY_TYPE) continue;
-
-      // 虚拟砖块高度降低一个砖块
-      const boundaryY = ny - 1;
-      if (boundaryY >= 0) {
-        // 检查该位置是否已有任何方块
-        if (!getBlock(nx, boundaryY, nz)) {
-          setBlock(nx, boundaryY, nz, BOUNDARY_TYPE);
-        }
-      }
-    }
-  }
-
-  function placeBlockAt(hit) {
-    const nx = hit.x + hit.normal.x;
-    const ny = hit.y + hit.normal.y;
-    const nz = hit.z + hit.normal.z;
-
-    // 检查目标位置是否已有方块（不能重复放置）
-    if (getBlock(nx, ny, nz)) return;
-
-    // 如果命中边界辅助方块，允许在外侧放置（nx, ny, nz 在虚空也可以）
-    // 但需要检查是否在世界范围内（允许稍微超出边界 1 格）
-    const hitType = getBlock(hit.x, hit.y, hit.z);
-    const isBoundaryHit = hitType === BOUNDARY_TYPE;
-
-    // 完全移除边界限制，允许玩家在任意位置放置方块（包括负数）
-    // 只需要检查目标位置是否已被占用（已在前面检查）
-    // 以及不与玩家碰撞（后面检查）
-
-    // 不允许把方块放进玩家身体：新方块若与玩家包围盒重叠则拒绝
-    // 但如果是在边界外侧扩建，允许方块与玩家重叠（因为玩家站在边界外侧，新方块可能紧贴玩家）
-    setBlock(nx, ny, nz, selectedType.value);
-    if (!isBoundaryHit) {
-      // 只有非边界命中时，才检查玩家碰撞
-      if (collidesAt(player.position.x, player.position.y, player.position.z)) {
-        setBlock(nx, ny, nz, 0);
-        return;
-      }
-    }
-
-    // 为新放置的真实砖块生成周围的虚拟砖块
-    generateBoundaryForBlock(nx, ny, nz);
-
-    buildMesh();
-  }
-
-  function resetToSpawn() {
-    const spawnX = Math.floor(WORLD_SIZE / 2);
-    const spawnZ = Math.floor(WORLD_SIZE / 2);
-    let groundY = WORLD_HEIGHT - 1;
-    for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
-      if (getBlock(spawnX, y, spawnZ)) {
-        groundY = y + 1;
-        break;
-      }
-    }
-    player.position.set(spawnX + 0.5, groundY + 0.02, spawnZ + 0.5);
-    player.velocity.set(0, 0, 0);
-    player.onGround = true;
-    camera.position.set(
-      player.position.x,
-      player.position.y + EYE_HEIGHT,
-      player.position.z,
-    );
-  }
-
-  // ---------- 存档与读档 ----------
-  async function saveWorld() {
-    try {
-      const data = {
-        voxels: Array.from(voxels.entries()),
-        player: {
-          x: player.position.x,
-          y: player.position.y,
-          z: player.position.z,
-          yaw: player.yaw,
-          pitch: player.pitch,
-        },
-        selectedType: selectedType.value,
-        timestamp: Date.now(),
-        storageType: storageAdapter.getType(),
-      };
-      await storageAdapter.save(STORAGE_KEY, data);
-      console.log(
-        `[存档] 已保存到 ${storageAdapter.getType()}, 共 ${data.voxels.length} 个方块`,
-      );
-      return true;
-    } catch (e) {
-      console.error("[存档] 保存失败:", e);
-      return false;
-    }
-  }
-
-  async function loadWorld() {
-    try {
-      const data = await storageAdapter.load(STORAGE_KEY);
-      if (!data) {
-        console.log("[读档] 没有找到存档数据");
-        return false;
-      }
-
-      // 恢复方块数据
-      voxels.clear();
-      for (const [key, type] of data.voxels) {
-        voxels.set(key, type);
-      }
-
-      // 恢复玩家位置
-      if (data.player) {
-        player.position.set(data.player.x, data.player.y, data.player.z);
-        player.yaw = data.player.yaw || 0;
-        player.pitch = data.player.pitch || 0;
-        player.velocity.set(0, 0, 0);
-        player.onGround = true;
-        camera.position.set(
-          player.position.x,
-          player.position.y + EYE_HEIGHT,
-          player.position.z,
-        );
-      }
-
-      // 恢复选中方块类型
-      if (data.selectedType) {
-        selectedType.value = data.selectedType;
-      }
-
-      // 重新构建网格
-      buildMesh();
-      console.log(
-        `[读档] 已从 ${data.storageType || storageAdapter.getType()} 加载，共 ${data.voxels.length} 个方块`,
-      );
-      return true;
-    } catch (e) {
-      console.error("[读档] 加载失败:", e);
-      return false;
-    }
-  }
-
-  async function clearSave() {
-    try {
-      await storageAdapter.clear(STORAGE_KEY);
-      console.log(`[清除存档] 已清除`);
-      return true;
-    } catch (e) {
-      console.error("[清除存档] 失败:", e);
-      return false;
-    }
-  }
-
-  // 重置世界（清除存档并重新生成默认地形）
-  async function resetWorld() {
-    try {
-      // 清除存档
-      await storageAdapter.clear(STORAGE_KEY);
-
-      // 清空所有方块
-      voxels.clear();
-
-      // 重新生成地形
-      generateTerrain();
-
-      // 重新构建网格
-      buildMesh();
-
-      // 重置玩家到出生点
-      resetToSpawn();
-
-      console.log("[重置世界] 已重置为默认地形");
-      return true;
-    } catch (e) {
-      console.error("[重置世界] 失败:", e);
-      return false;
-    }
-  }
-
-  // 自动存档（每 30 秒）
-  let autoSaveInterval = null;
-  function startAutoSave(intervalMs = 30000) {
-    stopAutoSave();
-    autoSaveInterval = setInterval(() => {
-      if (isLocked.value) {
-        saveWorld();
-      }
-    }, intervalMs);
-  }
-
-  function stopAutoSave() {
-    if (autoSaveInterval) {
-      clearInterval(autoSaveInterval);
-      autoSaveInterval = null;
-    }
   }
 
   function onResize() {
@@ -1187,171 +581,111 @@ export function useMinecraft(canvas) {
     renderer.setSize(canvasEl.clientWidth, canvasEl.clientHeight, false);
   }
 
-  // ---------- 物理与移动 ----------
-  const GRAVITY = -24;
-  const WALK_SPEED = 5;
-  const SPRINT_SPEED = 8.5;
-  const JUMP_SPEED = 8.5;
-  const EYE_HEIGHT = 1.62;
-  const PLAYER_HEIGHT = 1.8; // 玩家碰撞盒高度
-  const PLAYER_HALF = 0.3; // 玩家碰撞盒半宽（x/z 方向）
-
-  function isSolid(x, y, z) {
-    const type = getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
-    if (!type) return false;
-    // 边界辅助方块不可碰撞
-    if (type === BOUNDARY_TYPE) return false;
-    return BLOCK_TYPES[type] ? BLOCK_TYPES[type].solid : true;
+  // ---------- 全屏控制 ----------
+  function toggleFullscreen() {
+    const el = canvasEl || document.documentElement;
+    if (!document.fullscreenElement) {
+      el.requestFullscreen().catch((err) => {
+        console.warn("[全屏] 进入全屏失败:", err);
+      });
+    } else {
+      document.exitFullscreen().catch((err) => {
+        console.warn("[全屏] 退出全屏失败:", err);
+      });
+    }
   }
 
-  function updatePlayer(dt) {
-    if (!isLocked.value) return;
+  function onFullscreenChange() {
+    if (!document.fullscreenElement && isLocked.value) {
+      setTimeout(() => {
+        if (controls && !controls.isLocked) {
+          controls.lock();
+        }
+      }, 100);
+    }
+  }
 
-    // 朝向
-    player.yaw = controls.getAzimuthalAngle ? camera.rotation.y : player.yaw;
-    player.pitch = camera.rotation.x;
+  function isFullscreen() {
+    return !!document.fullscreenElement;
+  }
 
-    // 用相机真实朝向作为前方向量（可靠，不依赖手工三角函数符号约定）
-    const forward = new THREE.Vector3();
-    camera.getWorldDirection(forward);
-    forward.y = 0;
-    forward.normalize();
-    const right = new THREE.Vector3().crossVectors(
-      forward,
-      new THREE.Vector3(0, 1, 0),
+  // ---------- 初始化 ----------
+  function init() {
+    canvasEl = canvas && canvas.value !== undefined ? canvas.value : canvas;
+    if (!canvasEl) {
+      console.error("[useMinecraft] canvas 元素未找到");
+      return;
+    }
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+    scene.fog = new THREE.Fog(0x87ceeb, 30, 70);
+
+    renderer = new THREE.WebGLRenderer({ canvas: canvasEl, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(canvasEl.clientWidth, canvasEl.clientHeight, false);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    camera = new THREE.PerspectiveCamera(
+      75,
+      canvasEl.clientWidth / canvasEl.clientHeight,
+      0.1,
+      200,
     );
 
-    const move = new THREE.Vector3();
-    if (keys.forward) move.add(forward); // W 键：朝相机前方移动
-    if (keys.back) move.sub(forward); // S 键：朝相机后方移动
-    if (keys.left) move.sub(right);
-    if (keys.right) move.add(right);
-    if (move.lengthSq() > 0) move.normalize();
+    const sun = new THREE.DirectionalLight(0xffffff, 2.5);
+    sun.position.set(40, 60, 30);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -50;
+    sun.shadow.camera.right = 50;
+    sun.shadow.camera.top = 50;
+    sun.shadow.camera.bottom = -50;
+    sun.shadow.camera.far = 150;
+    scene.add(sun);
+    scene.add(new THREE.AmbientLight(0xbfd9ff, 1.2));
 
-    const speed = keys.sprint ? SPRINT_SPEED : WALK_SPEED;
-    const velocityXZ = move.multiplyScalar(speed);
-    player.velocity.x = velocityXZ.x;
-    player.velocity.z = velocityXZ.z;
+    controls = new PointerLockControls(camera, canvasEl);
+    controls.addEventListener("lock", () => {
+      isLocked.value = true;
+    });
+    controls.addEventListener("unlock", () => {
+      isLocked.value = false;
+    });
 
-    // 跳跃
-    if (keys.jump && player.onGround) {
-      player.velocity.y = JUMP_SPEED;
-      player.onGround = false;
-    }
+    _generateTerrain();
+    buildMesh();
+    scene.add(faceGroup);
 
-    // 重力
-    player.velocity.y += GRAVITY * dt;
-    // 限制最大下落速度，防止低帧率下单帧穿透方块
-    const MAX_FALL = 18;
-    if (player.velocity.y < -MAX_FALL) player.velocity.y = -MAX_FALL;
-
-    // 逐轴移动并做碰撞检测（先水平，再竖直）
-    stepMoveXZ(dt);
-    // y 轴用子步进，确保不穿透薄方块
-    stepMoveY(dt);
-
-    camera.position.set(
-      player.position.x,
-      player.position.y + EYE_HEIGHT,
-      player.position.z,
-    );
-  }
-
-  // y 轴子步进移动：把单帧竖直位移拆成小块，避免高速穿透方块
-  function stepMoveY(dt) {
-    const totalDy = player.velocity.y * dt;
-    const step = 0.2; // 每步最多移动 0.2 格
-    const steps = Math.max(1, Math.ceil(Math.abs(totalDy) / step));
-    const dyPerStep = totalDy / steps;
-
-    for (let i = 0; i < steps; i++) {
-      player.position.y += dyPerStep;
-      // 用包围盒检测，撞到则吸附并停止
-      if (collidesAt(player.position.x, player.position.y, player.position.z)) {
-        if (player.velocity.y < 0) {
-          // 向下撞到地面：脚贴回方块顶面
-          player.position.y = Math.floor(player.position.y) + 1 + 0.001;
-          player.onGround = true;
-        } else if (player.velocity.y > 0) {
-          // 向上撞到天花板：头顶贴回方块底面
-          player.position.y = Math.floor(player.position.y) - 0.001;
-        }
-        player.velocity.y = 0;
-        return;
+    loadWorld().then((loaded) => {
+      if (loaded) {
+        console.log("[存档] 自动读档成功");
+        buildMesh();
+        _generateBoundaryBlocks();
+        buildMesh();
+        camera.position.set(
+          player.position.x,
+          player.position.y + EYE_HEIGHT,
+          player.position.z,
+        );
+      } else {
+        console.log("[存档] 没有存档，使用默认世界");
+        resetToSpawn();
       }
-    }
-    // 没有撞到，说明在空中
-    if (player.velocity.y < 0) {
-      player.onGround = false;
-    }
-  }
+    });
 
-  // 玩家 AABB 包围盒是否与某个实心方块重叠
-  function collidesAt(px, py, pz) {
-    const minX = Math.floor(px - PLAYER_HALF);
-    const maxX = Math.floor(px + PLAYER_HALF);
-    const minY = Math.floor(py);
-    const maxY = Math.floor(py + PLAYER_HEIGHT);
-    const minZ = Math.floor(pz - PLAYER_HALF);
-    const maxZ = Math.floor(pz + PLAYER_HALF);
-    for (let x = minX; x <= maxX; x++) {
-      for (let y = minY; y <= maxY; y++) {
-        for (let z = minZ; z <= maxZ; z++) {
-          if (isSolid(x, y, z)) return true;
-        }
-      }
-    }
-    return false;
-  }
+    startAutoSave(30000);
 
-  // x/z 轴子步进移动：用包围盒逐轴检测，撞墙则吸附到方块边界
-  function stepMoveXZ(dt) {
-    const step = 0.2;
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keyup", onKeyUp);
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("resize", onResize);
 
-    // X 轴
-    const dx = player.velocity.x * dt;
-    const stepsX = Math.max(1, Math.ceil(Math.abs(dx) / step));
-    const dxPerStep = dx / stepsX;
-    for (let i = 0; i < stepsX; i++) {
-      player.position.x += dxPerStep;
-      if (collidesAt(player.position.x, player.position.y, player.position.z)) {
-        // 撞墙：吸附回方块边界
-        if (dxPerStep > 0) {
-          player.position.x =
-            Math.floor(player.position.x + PLAYER_HALF) - PLAYER_HALF - 0.001;
-        } else if (dxPerStep < 0) {
-          player.position.x =
-            Math.floor(player.position.x - PLAYER_HALF) +
-            1 +
-            PLAYER_HALF +
-            0.001;
-        }
-        player.velocity.x = 0;
-        break;
-      }
-    }
-
-    // Z 轴
-    const dz = player.velocity.z * dt;
-    const stepsZ = Math.max(1, Math.ceil(Math.abs(dz) / step));
-    const dzPerStep = dz / stepsZ;
-    for (let i = 0; i < stepsZ; i++) {
-      player.position.z += dzPerStep;
-      if (collidesAt(player.position.x, player.position.y, player.position.z)) {
-        if (dzPerStep > 0) {
-          player.position.z =
-            Math.floor(player.position.z + PLAYER_HALF) - PLAYER_HALF - 0.001;
-        } else if (dzPerStep < 0) {
-          player.position.z =
-            Math.floor(player.position.z - PLAYER_HALF) +
-            1 +
-            PLAYER_HALF +
-            0.001;
-        }
-        player.velocity.z = 0;
-        break;
-      }
-    }
+    animate();
   }
 
   // ---------- 渲染循环 ----------
@@ -1367,40 +701,10 @@ export function useMinecraft(canvas) {
 
     updatePlayer(dt);
     updateHighlight();
-
     renderer.render(scene, camera);
   }
 
-  function updateHighlight() {
-    if (!isLocked.value) {
-      faceGroup.visible = false;
-      return;
-    }
-    const hit = raycastBlock();
-    if (hit) {
-      // 根据法线确定要显示哪个面
-      const normalKey = `${Math.round(hit.normal.x)},${Math.round(hit.normal.y)},${Math.round(hit.normal.z)}`;
-      const faceName = normalToFace[normalKey];
-
-      // 隐藏所有面
-      faceNames.forEach((name) => {
-        faceMeshes[name].visible = false;
-      });
-
-      // 显示命中的面
-      if (faceName && faceMeshes[faceName]) {
-        faceMeshes[faceName].visible = true;
-        // 将面组移动到方块位置
-        faceGroup.position.set(hit.x + 0.5, hit.y + 0.5, hit.z + 0.5);
-        faceGroup.visible = true;
-      } else {
-        faceGroup.visible = false;
-      }
-    } else {
-      faceGroup.visible = false;
-    }
-  }
-
+  // ---------- 销毁 ----------
   function dispose() {
     disposed = true;
     stopAutoSave();
@@ -1413,7 +717,7 @@ export function useMinecraft(canvas) {
     document.removeEventListener("fullscreenchange", onFullscreenChange);
     window.removeEventListener("resize", onResize);
     if (controls) controls.dispose();
-    // 清理面高亮资源
+
     faceGroup.traverse((obj) => {
       if (obj.geometry) obj.geometry.dispose();
       if (obj.material) obj.material.dispose();
@@ -1431,37 +735,6 @@ export function useMinecraft(canvas) {
 
   onBeforeUnmount(dispose);
 
-  // ---------- 全屏控制 ----------
-  function toggleFullscreen() {
-    const el = canvasEl || document.documentElement;
-    if (!document.fullscreenElement) {
-      el.requestFullscreen().catch((err) => {
-        console.warn("[全屏] 进入全屏失败:", err);
-      });
-    } else {
-      document.exitFullscreen().catch((err) => {
-        console.warn("[全屏] 退出全屏失败:", err);
-      });
-    }
-  }
-
-  // 监听全屏变化，保持 PointerLock 状态
-  function onFullscreenChange() {
-    // 如果退出全屏且之前是锁定状态，重新锁定
-    if (!document.fullscreenElement && isLocked.value) {
-      // 延迟一下等待 DOM 稳定
-      setTimeout(() => {
-        if (controls && !controls.isLocked) {
-          controls.lock();
-        }
-      }, 100);
-    }
-  }
-
-  function isFullscreen() {
-    return !!document.fullscreenElement;
-  }
-
   return {
     isLocked,
     selectedType,
@@ -1472,7 +745,6 @@ export function useMinecraft(canvas) {
     dispose,
     lock: () => controls && controls.lock(),
     unlock: () => controls && controls.unlock(),
-    // 存档功能
     saveWorld,
     loadWorld,
     clearSave,
@@ -1480,7 +752,6 @@ export function useMinecraft(canvas) {
     startAutoSave,
     stopAutoSave,
     getStorageType: () => storageAdapter.getType(),
-    // 全屏功能
     toggleFullscreen,
     isFullscreen,
   };
