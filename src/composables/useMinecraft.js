@@ -73,6 +73,9 @@ const BLOCK_TYPES = {
 // 可在 HUD 中切换的方块（按数字键 1-6 选择，不包含边界辅助方块 7）
 const SELECTABLE_TYPES = [1, 4, 5, 2, 3, 6];
 
+// 滚轮切换节流时间（毫秒）
+const WHEEL_THROTTLE_MS = 150;
+
 /**
  * 我的世界风格体素沙盒：
  * - 简单噪声地形生成
@@ -385,11 +388,40 @@ export function useMinecraft(canvas) {
   // 已选中的方块类型（默认草块）；用 ref 以便 HUD 响应式显示
   const selectedType = ref(1);
 
+  // 滚轮切换节流相关
+  let lastWheelTime = 0;
+
   // 按数字键切换选中方块
   function selectType(index) {
     if (index >= 0 && index < SELECTABLE_TYPES.length) {
       selectedType.value = SELECTABLE_TYPES[index];
     }
+  }
+
+  // 滚轮切换方块（带节流）
+  function onWheel(e) {
+    if (!isLocked.value) return;
+    e.preventDefault();
+
+    const now = performance.now();
+    if (now - lastWheelTime < WHEEL_THROTTLE_MS) return;
+    lastWheelTime = now;
+
+    const currentIndex = SELECTABLE_TYPES.indexOf(selectedType.value);
+    if (currentIndex === -1) return;
+
+    let newIndex = currentIndex;
+    if (e.deltaY > 0) {
+      // 向下滚动：下一个
+      newIndex = (currentIndex + 1) % SELECTABLE_TYPES.length;
+    } else if (e.deltaY < 0) {
+      // 向上滚动：上一个
+      newIndex =
+        (currentIndex - 1 + SELECTABLE_TYPES.length) % SELECTABLE_TYPES.length;
+    } else {
+      return;
+    }
+    selectType(newIndex);
   }
 
   function init() {
@@ -471,6 +503,7 @@ export function useMinecraft(canvas) {
     document.addEventListener("keyup", onKeyUp);
     document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("contextmenu", onContextMenu);
+    document.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("resize", onResize);
 
     animate();
@@ -888,6 +921,7 @@ export function useMinecraft(canvas) {
     document.removeEventListener("keyup", onKeyUp);
     document.removeEventListener("mousedown", onMouseDown);
     document.removeEventListener("contextmenu", onContextMenu);
+    document.removeEventListener("wheel", onWheel);
     window.removeEventListener("resize", onResize);
     if (controls) controls.dispose();
     // 清理面高亮资源
