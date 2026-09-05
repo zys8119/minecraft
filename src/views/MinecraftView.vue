@@ -1,13 +1,19 @@
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, onBeforeUnmount, ref, computed } from 'vue'
 import { useMinecraft } from '../composables/useMinecraft'
 
 const canvasRef = ref(null)
-const { isLocked, selectedType, selectableTypes, blockTypes, texturePaths, init, lock, saveWorld, resetWorld, toggleFullscreen, isFullscreen } =
+const gameRootRef = ref(null)
+const { isLocked, selectedType, selectableTypes, blockTypes, texturePaths, init, lock, saveWorld, resetWorld, toggleFullscreen: baseToggleFullscreen, isFullscreen } =
   useMinecraft(canvasRef)
 
 const saveStatus = ref('')
 const resetConfirm = ref(false)
+
+// HUD 显示条件：锁定状态 或 全屏状态
+const showHUD = computed(() => {
+  return isLocked.value || isFullscreen()
+})
 
 async function handleSave() {
   saveStatus.value = '保存中...'
@@ -18,8 +24,18 @@ async function handleSave() {
   }, 2000)
 }
 
+// 全屏整个游戏容器，而不是只全屏 canvas
 function handleFullscreen() {
-  toggleFullscreen()
+  const el = gameRootRef.value
+  if (!document.fullscreenElement) {
+    el?.requestFullscreen?.().catch((err) => {
+      console.warn('[全屏] 进入全屏失败:', err)
+    })
+  } else {
+    document.exitFullscreen().catch((err) => {
+      console.warn('[全屏] 退出全屏失败:', err)
+    })
+  }
 }
 
 async function handleReset() {
@@ -67,11 +83,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="game-root">
+  <div ref="gameRootRef" class="game-root">
     <canvas ref="canvasRef" class="game-canvas" />
 
     <!-- 十字准星 -->
-    <div v-if="isLocked" class="crosshair">
+    <div v-if="showHUD" class="crosshair">
       <span class="crosshair-h" />
       <span class="crosshair-v" />
     </div>
@@ -94,7 +110,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 方块选择栏 -->
-    <div v-if="isLocked" class="hotbar">
+    <div v-if="showHUD" class="hotbar">
       <div v-for="(type, index) in selectableTypes" :key="type" class="hotbar-slot"
         :class="{ active: selectedType === type }" :style="{ borderColor: selectedType === type ? '#fff' : '#555' }">
         <span class="hotbar-swatch" :style="{
@@ -110,12 +126,12 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 游戏内底部提示 -->
-    <div v-if="isLocked" class="hud">
+    <div v-if="showHUD" class="hud">
       <span>左键破坏 · 右键放置 · 数字键 1-6 选方块 · R 回出生点 · Esc 暂停 · F 全屏 · Ctrl+S 存档</span>
     </div>
 
     <!-- 存档按钮与全屏按钮 -->
-    <div v-if="isLocked" class="action-buttons">
+    <div v-if="showHUD" class="action-buttons">
       <button class="action-btn save-btn" @click="handleSave" title="保存游戏 (Ctrl+S)">
         💾
       </button>
@@ -142,6 +158,8 @@ onBeforeUnmount(() => {
   display: block;
   width: 100%;
   height: 100%;
+  position: relative;
+  z-index: 1;
 }
 
 /* 十字准星 */
@@ -151,6 +169,7 @@ onBeforeUnmount(() => {
   left: 50%;
   pointer-events: none;
   transform: translate(-50%, -50%);
+  z-index: 9999;
 }
 
 .crosshair-h {
@@ -260,7 +279,7 @@ onBeforeUnmount(() => {
   padding: 6px;
   background: rgba(0, 0, 0, 0.5);
   border-radius: 10px;
-  z-index: 5;
+  z-index: 9999;
   pointer-events: none;
 }
 
@@ -316,7 +335,7 @@ onBeforeUnmount(() => {
   border-radius: 20px;
   font-size: 0.85rem;
   pointer-events: none;
-  z-index: 5;
+  z-index: 9999;
 }
 
 /* 操作按钮 */
@@ -326,8 +345,9 @@ onBeforeUnmount(() => {
   right: 20px;
   display: flex;
   gap: 10px;
-  z-index: 20;
+  z-index: 9999;
   align-items: center;
+  pointer-events: auto;
 }
 
 .action-btn {
