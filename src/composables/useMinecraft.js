@@ -5,6 +5,294 @@ import { PointerLockControls } from "three/examples/jsm/controls/PointerLockCont
 const WORLD_SIZE = 32; // 世界边长（方块数）
 const WORLD_HEIGHT = 24; // 世界高度（方块数）
 const BOUNDARY_TYPE = 7; // 边界辅助方块类型
+const STORAGE_KEY = "minecraft_world_data";
+
+// ---------- 存储适配器：按优先级降级 ----------
+class StorageAdapter {
+  constructor() {
+    this.storage = null;
+    this.type = null;
+    this._initStorage();
+  }
+
+  _initStorage() {
+    // 1. 尝试 WebSQL
+    if (window.openDatabase) {
+      try {
+        this.db = window.openDatabase(
+          "minecraft_db",
+          "1.0",
+          "Minecraft World Data",
+          5 * 1024 * 1024,
+        );
+        if (this.db) {
+          this.type = "websql";
+          this._initWebSQL();
+          return;
+        }
+      } catch (e) {
+        console.warn("WebSQL initialization failed:", e);
+      }
+    }
+
+    // 2. 尝试 IndexedDB
+    if (window.indexedDB) {
+      try {
+        this.type = "indexeddb";
+        this.dbName = "minecraft_db";
+        this.storeName = "world_data";
+        this._initIndexedDB();
+        return;
+      } catch (e) {
+        console.warn("IndexedDB initialization failed:", e);
+      }
+    }
+
+    // 3. 尝试 localStorage
+    if (window.localStorage) {
+      try {
+        this.type = "localstorage";
+        this.storage = window.localStorage;
+        return;
+      } catch (e) {
+        console.warn("localStorage initialization failed:", e);
+      }
+    }
+
+    // 4. 降级到 sessionStorage
+    if (window.sessionStorage) {
+      try {
+        this.type = "sessionstorage";
+        this.storage = window.sessionStorage;
+        return;
+      } catch (e) {
+        console.warn("sessionStorage initialization failed:", e);
+      }
+    }
+
+    this.type = "memory";
+    this.memoryStorage = new Map();
+    console.warn("No persistent storage available, using memory storage");
+  }
+
+  _initWebSQL() {
+    this.db.transaction((tx) => {
+      tx.executeSql(
+        "CREATE TABLE IF NOT EXISTS world_data (id INTEGER PRIMARY KEY, key TEXT UNIQUE, value TEXT)",
+        [],
+        () => {},
+        (tx, err) => {
+          console.warn("WebSQL create table error:", err);
+          return false;
+        },
+      );
+    });
+  }
+
+  _initIndexedDB() {
+    if (this._indexedDBReady) return;
+    const request = window.indexedDB.open(this.dbName, 1);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(this.storeName)) {
+        db.createObjectStore(this.storeName, { keyPath: "key" });
+      }
+    };
+    request.onsuccess = (event) => {
+      this._indexedDBReady = true;
+      this._indexedDB = event.target.result;
+    };
+    request.onerror = (event) => {
+      console.warn("IndexedDB open error:", event.target.error);
+    };
+  }
+
+  _getIndexedDB() {
+    return new Promise((resolve, reject) => {
+      if (this._indexedDB) {
+        resolve(this._indexedDB);
+        return;
+      }
+      const request = window.indexedDB.open(this.dbName, 1);
+      request.onsuccess = (event) => {
+        this._indexedDB = event.target.result;
+        resolve(this._indexedDB);
+      };
+      request.onerror = (event) => reject(event.target.error);
+    });
+  }
+
+  async save(key, data) {
+    const value = JSON.stringify(data);
+
+    switch (this.type) {
+      case "websql":
+        return new Promise((resolve, reject) => {
+          this.db.transaction((tx) => {
+            tx.executeSql(
+              "INSERT OR REPLACE INTO world_data (key, value) VALUES (?, ?)",
+              [key, value],
+              () => resolve(),
+              (tx, err) => {
+                reject(err);
+                return false;
+              },
+            );
+          });
+        });
+
+      case "indexeddb":
+        try {
+          const db = await this._getIndexedDB();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction([this.storeName], "readwrite");
+            const store = tx.objectStore(this.storeName);
+            const request = store.put({ key, value });
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+          });
+        } catch (e) {
+          throw e;
+        }
+
+      case "localstorage":
+      case "sessionstorage":
+        try {
+          this.storage.setItem(key, value);
+          return Promise.resolve();
+        } catch (e) {
+          return Promise.reject(e);
+        }
+
+      case "memory":
+        this.memoryStorage.set(key, value);
+        return Promise.resolve();
+
+      default:
+        return Promise.reject(new Error("Unsupported storage type"));
+    }
+  }
+
+  async load(key) {
+    switch (this.type) {
+      case "websql":
+        return new Promise((resolve, reject) => {
+          this.db.transaction((tx) => {
+            tx.executeSql(
+              "SELECT value FROM world_data WHERE key = ?",
+              [key],
+              (tx, results) => {
+                if (results.rows.length > 0) {
+                  try {
+                    resolve(JSON.parse(results.rows.item(0).value));
+                  } catch (e) {
+                    resolve(null);
+                  }
+                } else {
+                  resolve(null);
+                }
+              },
+              (tx, err) => {
+                reject(err);
+                return false;
+              },
+            );
+          });
+        });
+
+      case "indexeddb":
+        try {
+          const db = await this._getIndexedDB();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction([this.storeName], "readonly");
+            const store = tx.objectStore(this.storeName);
+            const request = store.get(key);
+            request.onsuccess = () => {
+              if (request.result) {
+                try {
+                  resolve(JSON.parse(request.result.value));
+                } catch (e) {
+                  resolve(null);
+                }
+              } else {
+                resolve(null);
+              }
+            };
+            request.onerror = () => reject(request.error);
+          });
+        } catch (e) {
+          return Promise.resolve(null);
+        }
+
+      case "localstorage":
+      case "sessionstorage":
+        try {
+          const data = this.storage.getItem(key);
+          return data ? JSON.parse(data) : null;
+        } catch (e) {
+          return null;
+        }
+
+      case "memory":
+        const data = this.memoryStorage.get(key);
+        return data ? JSON.parse(data) : null;
+
+      default:
+        return null;
+    }
+  }
+
+  async clear(key) {
+    switch (this.type) {
+      case "websql":
+        return new Promise((resolve, reject) => {
+          this.db.transaction((tx) => {
+            tx.executeSql(
+              "DELETE FROM world_data WHERE key = ?",
+              [key],
+              () => resolve(),
+              (tx, err) => {
+                reject(err);
+                return false;
+              },
+            );
+          });
+        });
+
+      case "indexeddb":
+        try {
+          const db = await this._getIndexedDB();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction([this.storeName], "readwrite");
+            const store = tx.objectStore(this.storeName);
+            const request = store.delete(key);
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+          });
+        } catch (e) {
+          return Promise.resolve();
+        }
+
+      case "localstorage":
+      case "sessionstorage":
+        this.storage.removeItem(key);
+        return Promise.resolve();
+
+      case "memory":
+        this.memoryStorage.delete(key);
+        return Promise.resolve();
+
+      default:
+        return Promise.resolve();
+    }
+  }
+
+  getType() {
+    return this.type;
+  }
+}
+
+const storageAdapter = new StorageAdapter();
 
 // 方块类型表：id -> 名称、颜色、特性
 // solid: 是否实心（false 表示可穿过，如火焰）
@@ -515,24 +803,46 @@ export function useMinecraft(canvas) {
     buildMesh();
     scene.add(faceGroup);
 
-    // 玩家初始位置：中心点地表上方
-    const spawnX = Math.floor(WORLD_SIZE / 2);
-    const spawnZ = Math.floor(WORLD_SIZE / 2);
-    let groundY = WORLD_HEIGHT - 1;
-    for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
-      if (getBlock(spawnX, y, spawnZ)) {
-        groundY = y + 1;
-        break;
+    // 尝试加载存档（异步，不阻塞初始化）
+    loadWorld().then((loaded) => {
+      if (loaded) {
+        console.log("[存档] 自动读档成功");
+        // 重新构建网格和边界
+        buildMesh();
+        // 重新生成边界方块（基于加载后的真实砖块）
+        generateBoundaryBlocks();
+        buildMesh();
+        // 更新相机位置
+        camera.position.set(
+          player.position.x,
+          player.position.y + EYE_HEIGHT,
+          player.position.z,
+        );
+      } else {
+        console.log("[存档] 没有存档，使用默认世界");
+        // 玩家初始位置：中心点地表上方
+        const spawnX = Math.floor(WORLD_SIZE / 2);
+        const spawnZ = Math.floor(WORLD_SIZE / 2);
+        let groundY = WORLD_HEIGHT - 1;
+        for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
+          if (getBlock(spawnX, y, spawnZ)) {
+            groundY = y + 1;
+            break;
+          }
+        }
+        player.position.set(spawnX + 0.5, groundY + 0.02, spawnZ + 0.5);
+        player.velocity.set(0, 0, 0);
+        player.onGround = true;
+        camera.position.set(
+          player.position.x,
+          player.position.y + EYE_HEIGHT,
+          player.position.z,
+        );
       }
-    }
-    player.position.set(spawnX + 0.5, groundY + 0.02, spawnZ + 0.5);
-    player.velocity.set(0, 0, 0);
-    player.onGround = true;
-    camera.position.set(
-      player.position.x,
-      player.position.y + EYE_HEIGHT,
-      player.position.z,
-    );
+    });
+
+    // 启动自动存档（每 30 秒）
+    startAutoSave(30000);
 
     // 事件绑定
     document.addEventListener("keydown", onKeyDown);
@@ -740,6 +1050,107 @@ export function useMinecraft(canvas) {
       player.position.y + EYE_HEIGHT,
       player.position.z,
     );
+  }
+
+  // ---------- 存档与读档 ----------
+  async function saveWorld() {
+    try {
+      const data = {
+        voxels: Array.from(voxels.entries()),
+        player: {
+          x: player.position.x,
+          y: player.position.y,
+          z: player.position.z,
+          yaw: player.yaw,
+          pitch: player.pitch,
+        },
+        selectedType: selectedType.value,
+        timestamp: Date.now(),
+        storageType: storageAdapter.getType(),
+      };
+      await storageAdapter.save(STORAGE_KEY, data);
+      console.log(
+        `[存档] 已保存到 ${storageAdapter.getType()}, 共 ${data.voxels.length} 个方块`,
+      );
+      return true;
+    } catch (e) {
+      console.error("[存档] 保存失败:", e);
+      return false;
+    }
+  }
+
+  async function loadWorld() {
+    try {
+      const data = await storageAdapter.load(STORAGE_KEY);
+      if (!data) {
+        console.log("[读档] 没有找到存档数据");
+        return false;
+      }
+
+      // 恢复方块数据
+      voxels.clear();
+      for (const [key, type] of data.voxels) {
+        voxels.set(key, type);
+      }
+
+      // 恢复玩家位置
+      if (data.player) {
+        player.position.set(data.player.x, data.player.y, data.player.z);
+        player.yaw = data.player.yaw || 0;
+        player.pitch = data.player.pitch || 0;
+        player.velocity.set(0, 0, 0);
+        player.onGround = true;
+        camera.position.set(
+          player.position.x,
+          player.position.y + EYE_HEIGHT,
+          player.position.z,
+        );
+      }
+
+      // 恢复选中方块类型
+      if (data.selectedType) {
+        selectedType.value = data.selectedType;
+      }
+
+      // 重新构建网格
+      buildMesh();
+      console.log(
+        `[读档] 已从 ${data.storageType || storageAdapter.getType()} 加载，共 ${data.voxels.length} 个方块`,
+      );
+      return true;
+    } catch (e) {
+      console.error("[读档] 加载失败:", e);
+      return false;
+    }
+  }
+
+  async function clearSave() {
+    try {
+      await storageAdapter.clear(STORAGE_KEY);
+      console.log(`[清除存档] 已清除`);
+      return true;
+    } catch (e) {
+      console.error("[清除存档] 失败:", e);
+      return false;
+    }
+  }
+
+  // 自动存档（每 30 秒）
+  let autoSaveInterval = null;
+  function startAutoSave(intervalMs = 30000) {
+    stopAutoSave();
+    autoSaveInterval = setInterval(() => {
+      if (isLocked.value) {
+        saveWorld();
+      }
+    }, intervalMs);
+  }
+
+  function stopAutoSave() {
+    if (autoSaveInterval) {
+      clearInterval(autoSaveInterval);
+      autoSaveInterval = null;
+    }
   }
 
   function onResize() {
@@ -965,6 +1376,7 @@ export function useMinecraft(canvas) {
 
   function dispose() {
     disposed = true;
+    stopAutoSave();
     cancelAnimationFrame(rafId);
     document.removeEventListener("keydown", onKeyDown);
     document.removeEventListener("keyup", onKeyUp);
@@ -1001,5 +1413,12 @@ export function useMinecraft(canvas) {
     dispose,
     lock: () => controls && controls.lock(),
     unlock: () => controls && controls.unlock(),
+    // 存档功能
+    saveWorld,
+    loadWorld,
+    clearSave,
+    startAutoSave,
+    stopAutoSave,
+    getStorageType: () => storageAdapter.getType(),
   };
 }
