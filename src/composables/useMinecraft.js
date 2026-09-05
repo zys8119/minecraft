@@ -97,11 +97,18 @@ export function useMinecraft(canvas) {
   const _stepMoveXZ = (dt) => stepMoveXZ(player, dt, getBlock);
   const _stepMoveY = (dt) => stepMoveY(player, dt, getBlock);
 
-  // ---------- 构建网格 ----------
+  // ---------- 构建网格（完全重建，用于初始化） ----------
+  let meshCache = {}; // 缓存每种类型的 InstancedMesh 引用
+  let geometryCache = null;
+  let materialsCache = {};
+
   function buildMesh() {
+    // 清除旧网格
     blockMeshes.clear();
+    meshCache = {};
 
     const geometry = new THREE.BoxGeometry(1, 1, 1);
+    geometryCache = geometry;
     const loader = new THREE.TextureLoader();
     const materials = {};
 
@@ -132,6 +139,17 @@ export function useMinecraft(canvas) {
         emissiveIntensity: info.emissive ? 1.2 : 1,
       });
     }
+    materialsCache = materials;
+
+    rebuildMeshFromVoxels();
+  }
+
+  // 从 voxels 重建所有 InstancedMesh（增量更新时调用）
+  function rebuildMeshFromVoxels() {
+    // 清空 blockMeshes 但不销毁几何体和材质
+    while (blockMeshes.children.length > 0) {
+      blockMeshes.remove(blockMeshes.children[0]);
+    }
 
     const byType = new Map();
     for (const [key, type] of voxels.entries()) {
@@ -140,10 +158,10 @@ export function useMinecraft(canvas) {
     }
 
     for (const [type, positions] of byType.entries()) {
-      if (!materials[type]) continue;
+      if (!materialsCache[type]) continue;
       const mesh = new THREE.InstancedMesh(
-        geometry,
-        materials[type],
+        geometryCache,
+        materialsCache[type],
         positions.length,
       );
       const matrix = new THREE.Matrix4();
@@ -156,7 +174,26 @@ export function useMinecraft(canvas) {
       mesh.receiveShadow = true;
       blockMeshes.add(mesh);
     }
-    scene.add(blockMeshes);
+    // 确保 blockMeshes 在场景中
+    if (!blockMeshes.parent) {
+      scene.add(blockMeshes);
+    }
+  }
+
+  // 增量更新：只修改变化的砖块
+  let updatePending = false;
+  let updateTimeout = null;
+
+  function scheduleMeshUpdate() {
+    if (updateTimeout) {
+      cancelAnimationFrame(updateTimeout);
+      updateTimeout = null;
+    }
+    // 使用 requestAnimationFrame 批量更新，避免多次重建
+    updateTimeout = requestAnimationFrame(() => {
+      updateTimeout = null;
+      rebuildMeshFromVoxels();
+    });
   }
 
   // ---------- 高亮面 ----------
@@ -240,7 +277,7 @@ export function useMinecraft(canvas) {
     const type = getBlock(hit.x, hit.y, hit.z);
     if (type === BOUNDARY_TYPE) return;
     setBlock(hit.x, hit.y, hit.z, 0);
-    buildMesh();
+    scheduleMeshUpdate();
   }
 
   function placeBlockAt(hit) {
@@ -264,7 +301,7 @@ export function useMinecraft(canvas) {
     }
 
     _generateBoundaryForBlock(nx, ny, nz);
-    buildMesh();
+    scheduleMeshUpdate();
   }
 
   function resetToSpawn() {

@@ -1,5 +1,3 @@
-const STORAGE_KEY = 'minecraft_world_data'
-
 // ---------- 存储适配器：按优先级降级 ----------
 export class StorageAdapter {
   constructor() {
