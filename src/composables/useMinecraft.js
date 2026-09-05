@@ -159,17 +159,53 @@ export function useMinecraft(canvas) {
   }
 
   function generateBoundaryBlocks() {
-    // 覆盖所有高度，确保玩家在任何高度都能选中边界方块进行扩建
-    for (let y = 0; y < WORLD_HEIGHT; y++) {
-      for (let x = 0; x < WORLD_SIZE; x++) {
-        // z 方向的两条边界
-        setBlock(x, y, 0, BOUNDARY_TYPE);
-        setBlock(x, y, WORLD_SIZE - 1, BOUNDARY_TYPE);
+    // 只在最外侧真实砖块的四周且周围没有真实砖块的位置放置虚拟砖块
+    // 虚拟砖块高度比真实砖块低一个砖块（y-1）
+    const boundaryPositions = new Set();
+
+    // 遍历所有真实砖块
+    for (const [key, type] of voxels.entries()) {
+      // 跳过边界方块（type 7）
+      if (type === BOUNDARY_TYPE) continue;
+
+      const [x, y, z] = key.split(",").map(Number);
+
+      // 检查四个水平方向（上、下、左、右）
+      const neighbors = [
+        [1, 0, 0],
+        [-1, 0, 0],
+        [0, 0, 1],
+        [0, 0, -1],
+      ];
+
+      for (const [dx, dy, dz] of neighbors) {
+        const nx = x + dx;
+        const ny = y + dy;
+        const nz = z + dz;
+
+        // 检查该位置是否有真实砖块（排除边界方块）
+        const neighborType = getBlock(nx, ny, nz);
+        if (neighborType && neighborType !== BOUNDARY_TYPE) continue;
+
+        // 检查该位置是否已有边界方块
+        if (getBlock(nx, ny, nz) === BOUNDARY_TYPE) continue;
+
+        // 在该位置放置虚拟砖块，但高度降低一个砖块（y-1）
+        // 这样虚拟砖块在真实砖块的下方，玩家站在真实砖块上时能选中虚拟砖块的外侧面
+        const boundaryY = ny - 1;
+        // 确保边界方块不低于地面（最小 y=0）
+        if (boundaryY >= 0) {
+          boundaryPositions.add(`${nx},${boundaryY},${nz}`);
+        }
       }
-      for (let z = 0; z < WORLD_SIZE; z++) {
-        // x 方向的两条边界
-        setBlock(0, y, z, BOUNDARY_TYPE);
-        setBlock(WORLD_SIZE - 1, y, z, BOUNDARY_TYPE);
+    }
+
+    // 将虚拟砖块添加到 voxels
+    for (const key of boundaryPositions) {
+      const [x, y, z] = key.split(",").map(Number);
+      // 检查该位置是否已有任何方块（避免覆盖真实砖块）
+      if (!getBlock(x, y, z)) {
+        setBlock(x, y, z, BOUNDARY_TYPE);
       }
     }
   }
@@ -633,30 +669,9 @@ export function useMinecraft(canvas) {
     const hitType = getBlock(hit.x, hit.y, hit.z);
     const isBoundaryHit = hitType === BOUNDARY_TYPE;
 
-    // 普通方块只能在世界内部放置，边界方块允许向外扩 1 格
-    if (!isBoundaryHit) {
-      // 检查目标位置是否在世界范围内（不能超出边界）
-      if (
-        nx < 0 ||
-        nx >= WORLD_SIZE ||
-        nz < 0 ||
-        nz >= WORLD_SIZE
-        // 移除高度限制：ny 不再受 WORLD_HEIGHT 限制
-      ) {
-        return;
-      }
-    } else {
-      // 边界方块外侧放置：允许目标位置超出世界 1 格
-      if (
-        nx < -1 ||
-        nx > WORLD_SIZE ||
-        nz < -1 ||
-        nz > WORLD_SIZE
-        // 移除高度限制：ny 不再受 WORLD_HEIGHT 限制
-      ) {
-        return;
-      }
-    }
+    // 完全移除边界限制，允许玩家在任意位置放置方块（包括负数）
+    // 只需要检查目标位置是否已被占用（已在前面检查）
+    // 以及不与玩家碰撞（后面检查）
 
     // 不允许把方块放进玩家身体：新方块若与玩家包围盒重叠则拒绝
     // 但如果是在边界外侧扩建，允许方块与玩家重叠（因为玩家站在边界外侧，新方块可能紧贴玩家）
@@ -675,9 +690,24 @@ export function useMinecraft(canvas) {
       const outerX = nx + hit.normal.x;
       const outerY = ny + hit.normal.y;
       const outerZ = nz + hit.normal.z;
-      // 如果外侧位置还没有边界方块，生成一个
-      if (!getBlock(outerX, outerY, outerZ)) {
-        setBlock(outerX, outerY, outerZ, BOUNDARY_TYPE);
+
+      // 检查外侧位置是否已有真实砖块
+      const outerType = getBlock(outerX, outerY, outerZ);
+      if (outerType && outerType !== BOUNDARY_TYPE) {
+        // 如果已经有真实砖块，不需要生成边界
+        // 但需要检查更外侧是否还有位置需要边界
+      }
+
+      // 如果外侧位置还没有边界方块，且没有真实砖块，生成一个
+      if (!outerType || outerType === BOUNDARY_TYPE) {
+        // 边界方块高度降低一个砖块（y-1）
+        const boundaryY = outerY - 1;
+        if (boundaryY >= 0 && !getBlock(outerX, boundaryY, outerZ)) {
+          // 检查该位置是否已有任何方块
+          if (!getBlock(outerX, boundaryY, outerZ)) {
+            setBlock(outerX, boundaryY, outerZ, BOUNDARY_TYPE);
+          }
+        }
       }
     }
 
