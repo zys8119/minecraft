@@ -4,7 +4,7 @@ import { useMinecraft } from '../composables/useMinecraft'
 
 const canvasRef = ref(null)
 const gameRootRef = ref(null)
-const { isLocked, selectedType, selectableTypes, blockTypes, texturePaths, init, lock, saveWorld, resetWorld, toggleFullscreen: baseToggleFullscreen, isFullscreen } =
+const { isLocked, selectedType, selectableTypes, blockTypes, texturePaths, init, lock, saveWorld, resetWorld, isFullscreen } =
   useMinecraft(canvasRef)
 
 const saveStatus = ref('')
@@ -24,7 +24,7 @@ async function handleSave() {
   }, 2000)
 }
 
-// 全屏整个游戏容器，而不是只全屏 canvas
+// 全屏整个游戏容器
 function handleFullscreen() {
   const el = gameRootRef.value
   if (!document.fullscreenElement) {
@@ -61,7 +61,7 @@ function onKeyDown(e) {
   // F 键切换全屏
   if (e.key === 'f' || e.key === 'F') {
     e.preventDefault()
-    toggleFullscreen()
+    handleFullscreen()
   }
   // Ctrl+S 或 Alt+S 存档
   if ((e.ctrlKey || e.altKey) && (e.key === 's' || e.key === 'S')) {
