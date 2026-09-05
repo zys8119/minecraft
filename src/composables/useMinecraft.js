@@ -850,6 +850,7 @@ export function useMinecraft(canvas) {
     document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("contextmenu", onContextMenu);
     document.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("fullscreenchange", onFullscreenChange);
     window.addEventListener("resize", onResize);
 
     animate();
@@ -1409,6 +1410,7 @@ export function useMinecraft(canvas) {
     document.removeEventListener("mousedown", onMouseDown);
     document.removeEventListener("contextmenu", onContextMenu);
     document.removeEventListener("wheel", onWheel);
+    document.removeEventListener("fullscreenchange", onFullscreenChange);
     window.removeEventListener("resize", onResize);
     if (controls) controls.dispose();
     // 清理面高亮资源
@@ -1440,6 +1442,19 @@ export function useMinecraft(canvas) {
       document.exitFullscreen().catch((err) => {
         console.warn("[全屏] 退出全屏失败:", err);
       });
+    }
+  }
+
+  // 监听全屏变化，保持 PointerLock 状态
+  function onFullscreenChange() {
+    // 如果退出全屏且之前是锁定状态，重新锁定
+    if (!document.fullscreenElement && isLocked.value) {
+      // 延迟一下等待 DOM 稳定
+      setTimeout(() => {
+        if (controls && !controls.isLocked) {
+          controls.lock();
+        }
+      }, 100);
     }
   }
 
