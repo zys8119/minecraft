@@ -156,9 +156,8 @@ export function useMinecraft(canvas) {
   }
 
   function generateBoundaryBlocks() {
-    const boundaryYMin = 0;
-    const boundaryYMax = Math.min(WORLD_HEIGHT, 12); // 只生成底部12层，节约性能
-    for (let y = boundaryYMin; y < boundaryYMax; y++) {
+    // 覆盖所有高度，确保玩家在任何高度都能选中边界方块进行扩建
+    for (let y = 0; y < WORLD_HEIGHT; y++) {
       for (let x = 0; x < WORLD_SIZE; x++) {
         // z 方向的两条边界
         setBlock(x, y, 0, BOUNDARY_TYPE);
@@ -182,16 +181,26 @@ export function useMinecraft(canvas) {
     const materials = {};
     for (const [typeStr, info] of Object.entries(BLOCK_TYPES)) {
       const type = Number(typeStr);
+      const isBoundary = type === BOUNDARY_TYPE;
+      // 边界辅助方块：完全透明，不使用纹理
+      if (isBoundary) {
+        materials[type] = new THREE.MeshLambertMaterial({
+          transparent: true,
+          opacity: 0,
+          color: 0x000000,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        continue;
+      }
       const tex = loader.load(TEXTURE_PATHS[type]);
       tex.magFilter = THREE.NearestFilter;
       tex.minFilter = THREE.NearestFilter;
       tex.colorSpace = THREE.SRGBColorSpace;
-      // 边界辅助方块完全透明
-      const isBoundary = type === BOUNDARY_TYPE;
       materials[type] = new THREE.MeshLambertMaterial({
         map: tex,
-        transparent: true,
-        opacity: isBoundary ? 0 : info.transparent ? 0.55 : 1,
+        transparent: info.transparent,
+        opacity: info.transparent ? 0.55 : 1,
         emissive: info.emissive ? new THREE.Color("#ff6d00") : undefined,
         emissiveIntensity: info.emissive ? 1.2 : 1,
       });
@@ -236,7 +245,7 @@ export function useMinecraft(canvas) {
   };
 
   // ---------- 射线检测：返回命中的方块与命中面法线 ----------
-  function raycastBlock(maxDist = 6) {
+  function raycastBlock(maxDist = 15) {
     const origin = camera.position.clone();
     const dir = camera.getWorldDirection(new THREE.Vector3());
 
@@ -579,20 +588,54 @@ export function useMinecraft(canvas) {
   }
 
   function placeBlockAt(hit) {
-    // 禁止在边界辅助方块上叠放
-    const hitType = getBlock(hit.x, hit.y, hit.z);
-    if (hitType === BOUNDARY_TYPE) return;
-
     const nx = hit.x + hit.normal.x;
     const ny = hit.y + hit.normal.y;
     const nz = hit.z + hit.normal.z;
+
     // 检查目标位置是否已有方块（不能重复放置）
     if (getBlock(nx, ny, nz)) return;
+
+    // 如果命中边界辅助方块，允许在外侧放置（nx, ny, nz 在虚空也可以）
+    // 但需要检查是否在世界范围内（允许稍微超出边界 1 格）
+    const hitType = getBlock(hit.x, hit.y, hit.z);
+    const isBoundaryHit = hitType === BOUNDARY_TYPE;
+
+    // 普通方块只能在世界内部放置，边界方块允许向外扩 1 格
+    if (!isBoundaryHit) {
+      // 检查目标位置是否在世界范围内（不能超出边界）
+      if (
+        nx < 0 ||
+        nx >= WORLD_SIZE ||
+        nz < 0 ||
+        nz >= WORLD_SIZE ||
+        ny < 0 ||
+        ny >= WORLD_HEIGHT
+      ) {
+        return;
+      }
+    } else {
+      // 边界方块外侧放置：允许目标位置超出世界 1 格
+      if (
+        nx < -1 ||
+        nx > WORLD_SIZE ||
+        nz < -1 ||
+        nz > WORLD_SIZE ||
+        ny < 0 ||
+        ny >= WORLD_HEIGHT
+      ) {
+        return;
+      }
+    }
+
     // 不允许把方块放进玩家身体：新方块若与玩家包围盒重叠则拒绝
+    // 但如果是在边界外侧扩建，允许方块与玩家重叠（因为玩家站在边界外侧，新方块可能紧贴玩家）
     setBlock(nx, ny, nz, selectedType.value);
-    if (collidesAt(player.position.x, player.position.y, player.position.z)) {
-      setBlock(nx, ny, nz, 0);
-      return;
+    if (!isBoundaryHit) {
+      // 只有非边界命中时，才检查玩家碰撞
+      if (collidesAt(player.position.x, player.position.y, player.position.z)) {
+        setBlock(nx, ny, nz, 0);
+        return;
+      }
     }
     buildMesh();
   }
